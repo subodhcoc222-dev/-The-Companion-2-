@@ -20,7 +20,6 @@ import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.widget.*
-import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import com.desk.companion2.DeskConfig
 import com.desk.companion2.receivers.CompanionAdminReceiver
@@ -31,18 +30,16 @@ import java.util.*
 
 class MainActivity : AppCompatActivity() {
 
-    private var dbRef: DatabaseReference? = null
+    private lateinit var dbRef: DatabaseReference
     private var valueListener: ValueEventListener? = null
+    private var connectionStateListener: ValueEventListener? = null
 
     private lateinit var tvStatusBadge: TextView
     private lateinit var tvBatteryValue: TextView
     private lateinit var tvBatterySub: TextView
     private lateinit var tvHeartbeatValue: TextView
     private lateinit var tvHeartbeatSub: TextView
-    private lateinit var tvDeviceIdBadge: TextView
-
     private lateinit var btnRequestSnap: Button
-    private lateinit var photoWindowFrame: FrameLayout
     private lateinit var ivLivePhoto: ImageView
     private lateinit var tvPhotoPlaceholder: TextView
     private lateinit var tvPhotoTimestamp: TextView
@@ -58,7 +55,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         renderExecutiveDashboard()
-        connectToFirebaseStream()
+        connectDirectlyToFirebase()
     }
 
     private fun renderExecutiveDashboard() {
@@ -74,6 +71,9 @@ class MainActivity : AppCompatActivity() {
             setPadding(dp(20), dp(24), dp(20), dp(36))
         }
 
+        // ==========================================
+        // 1. TOP HEADER (HARDCODED TARGET ID)
+        // ==========================================
         val headerRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -92,14 +92,12 @@ class MainActivity : AppCompatActivity() {
             typeface = Typeface.create("sans-serif-black", Typeface.BOLD)
         }
 
-        tvDeviceIdBadge = TextView(this).apply {
-            val currentId = DeskConfig.getTargetDeviceId(this@MainActivity)
-            text = "TARGET ID: #$currentId (Tap to Pair ⚙)"
+        val tvDeviceIdBadge = TextView(this).apply {
+            text = "TARGET: #${DeskConfig.TARGET_DEVICE_ID} (PERMANENT GUARD)"
             setTextColor(Color.parseColor("#38BDF8"))
             textSize = 12f
             typeface = Typeface.MONOSPACE
             setPadding(0, dp(4), 0, 0)
-            setOnClickListener { showPairDeviceDialog() }
         }
         titleCol.addView(tvAppTitle)
         titleCol.addView(tvDeviceIdBadge)
@@ -117,6 +115,9 @@ class MainActivity : AppCompatActivity() {
         headerRow.addView(tvStatusBadge)
         mainContainer.addView(headerRow)
 
+        // ==========================================
+        // 2. HARDWARE TELEMETRY GRID
+        // ==========================================
         val telemetryGrid = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             val params = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
@@ -124,6 +125,7 @@ class MainActivity : AppCompatActivity() {
             layoutParams = params
         }
 
+        // Battery Card
         val batteryCard = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             background = createCardDrawable(Color.parseColor("#131B2E"), Color.parseColor("#1E293B"))
@@ -146,7 +148,7 @@ class MainActivity : AppCompatActivity() {
             setPadding(0, dp(4), 0, dp(2))
         }
         tvBatterySub = TextView(this).apply {
-            text = "Waiting..."
+            text = "Syncing state..."
             setTextColor(Color.parseColor("#64748B"))
             textSize = 11f
         }
@@ -154,6 +156,7 @@ class MainActivity : AppCompatActivity() {
         batteryCard.addView(tvBatteryValue)
         batteryCard.addView(tvBatterySub)
 
+        // Heartbeat Card
         val heartbeatCard = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             background = createCardDrawable(Color.parseColor("#131B2E"), Color.parseColor("#1E293B"))
@@ -188,6 +191,9 @@ class MainActivity : AppCompatActivity() {
         telemetryGrid.addView(heartbeatCard)
         mainContainer.addView(telemetryGrid)
 
+        // ==========================================
+        // 3. LIVE SNAPSHOT BUTTON & DIRECT WINDOW
+        // ==========================================
         btnRequestSnap = createModernButton("📸 Request Live Snapshot", Color.parseColor("#0284C7"), Color.WHITE).apply {
             val params = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(48))
             params.setMargins(0, 0, 0, dp(10))
@@ -196,7 +202,7 @@ class MainActivity : AppCompatActivity() {
         }
         mainContainer.addView(btnRequestSnap)
 
-        photoWindowFrame = FrameLayout(this).apply {
+        val photoWindowFrame = FrameLayout(this).apply {
             layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(220)).apply {
                 setMargins(0, 0, 0, dp(16))
             }
@@ -237,6 +243,9 @@ class MainActivity : AppCompatActivity() {
         photoWindowFrame.addView(tvPhotoTimestamp)
         mainContainer.addView(photoWindowFrame)
 
+        // ==========================================
+        // 4. STUDY LOGS
+        // ==========================================
         val btnViewReports = createModernButton("📊 View Complete Study Logs", Color.parseColor("#0F766E"), Color.WHITE).apply {
             val params = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(48))
             params.setMargins(0, 0, 0, dp(20))
@@ -247,6 +256,9 @@ class MainActivity : AppCompatActivity() {
         }
         mainContainer.addView(btnViewReports)
 
+        // ==========================================
+        // 5. SECURITY CHECKLIST WIZARD
+        // ==========================================
         val tvShieldTitle = TextView(this).apply {
             text = "🛡️ ANTI-TAMPER SECURITY CHECKLIST"
             setTextColor(Color.parseColor("#38BDF8"))
@@ -279,53 +291,29 @@ class MainActivity : AppCompatActivity() {
         setContentView(rootScroll)
     }
 
-    private fun showPairDeviceDialog() {
-        val currentId = DeskConfig.getTargetDeviceId(this)
-        val input = EditText(this).apply {
-            hint = "e.g. 349806"
-            inputType = android.text.InputType.TYPE_CLASS_NUMBER
-            setText(currentId)
-            setTextColor(Color.BLACK)
-            setBackgroundResource(android.R.drawable.edit_text)
-            setPadding(dp(14), dp(10), dp(14), dp(10))
-        }
+    private fun connectDirectlyToFirebase() {
+        val db = FirebaseDatabase.getInstance()
 
-        val container = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(24), dp(16), dp(24), dp(8))
-            addView(input)
-        }
-
-        AlertDialog.Builder(this, androidx.appcompat.R.style.Theme_AppCompat_Light_Dialog_Alert)
-            .setTitle("🔗 Pair Desk Sentry Camera")
-            .setMessage("Enter the 6-digit Device ID displayed at the top of your Desk Sentry camera phone:")
-            .setView(container)
-            .setPositiveButton("Connect & Save") { _, _ ->
-                val newId = input.text.toString().trim()
-                if (newId.isNotEmpty()) {
-                    DeskConfig.setTargetDeviceId(this, newId)
-                    tvDeviceIdBadge.text = "TARGET ID: #$newId (Tap to Pair ⚙)"
-                    Toast.makeText(this, "Reconnecting to Device #$newId...", Toast.LENGTH_SHORT).show()
-                    connectToFirebaseStream()
-                    startService(Intent(this, DeskMonitorService::class.java))
+        // Connection Watchdog
+        connectionStateListener = object : ValueEventListener {
+            override fun onDataChange(snapshot: DataSnapshot) {
+                val isConnected = snapshot.getValue(Boolean::class.java) ?: false
+                if (!isConnected && tvStatusBadge.text == "● CONNECTING") {
+                    tvStatusBadge.text = "○ CHECKING NETWORK..."
+                    tvStatusBadge.setTextColor(Color.parseColor("#94A3B8"))
                 }
             }
-            .setNegativeButton("Cancel", null)
-            .show()
-    }
+            override fun onCancelled(error: DatabaseError) {}
+        }
+        db.getReference(".info/connected").addValueEventListener(connectionStateListener!!)
 
-    private fun connectToFirebaseStream() {
-        valueListener?.let { dbRef?.removeEventListener(it) }
-
-        val targetId = DeskConfig.getTargetDeviceId(this)
-        dbRef = FirebaseDatabase.getInstance()
-            .getReference(DeskConfig.FIREBASE_ROOT_NODE)
-            .child(targetId)
+        // Hardcoded Node Target Tracking
+        dbRef = db.getReference(DeskConfig.FIREBASE_ROOT_NODE).child(DeskConfig.TARGET_DEVICE_ID)
 
         valueListener = object : ValueEventListener {
             override fun onDataChange(snapshot: DataSnapshot) {
                 if (!snapshot.exists()) {
-                    tvStatusBadge.text = "○ DEVICE NOT FOUND"
+                    tvStatusBadge.text = "○ CAMERA STANDBY"
                     tvStatusBadge.setTextColor(Color.parseColor("#94A3B8"))
                     tvStatusBadge.background = createPillDrawable(Color.parseColor("#1E293B"), Color.parseColor("#475569"))
                     return
@@ -393,12 +381,12 @@ class MainActivity : AppCompatActivity() {
                 tvStatusBadge.setTextColor(Color.parseColor("#EF4444"))
             }
         }
-        dbRef?.addValueEventListener(valueListener!!)
+        dbRef.addValueEventListener(valueListener!!)
     }
 
     private fun requestSnapshot() {
         btnRequestSnap.text = "⏳ Requesting Frame..."
-        dbRef?.child("commands")?.child("request_snap")?.setValue(true)
+        dbRef.child("commands").child("request_snap").setValue(true)
         Toast.makeText(this, "Command sent to camera stand...", Toast.LENGTH_SHORT).show()
     }
 
@@ -546,6 +534,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
-        valueListener?.let { dbRef?.removeEventListener(it) }
+        valueListener?.let { dbRef.removeEventListener(it) }
+        connectionStateListener?.let { FirebaseDatabase.getInstance().getReference(".info/connected").removeEventListener(it) }
     }
 }
