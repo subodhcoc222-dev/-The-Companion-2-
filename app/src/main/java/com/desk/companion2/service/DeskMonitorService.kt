@@ -18,9 +18,9 @@ import java.util.Calendar
 
 class DeskMonitorService : Service() {
 
-    private val CHANNEL_ID = "DeskCompanion2ServiceChannel"
-    private val ALARM_CHANNEL_ID = "DeskCompanion2AlarmChannel"
-    private val WARNING_CHANNEL_ID = "DeskCompanion2WarningChannel"
+    private val CHANNEL_ID = "DeskCompanion2ServiceChannel_v3"
+    private val ALARM_CHANNEL_ID = "DeskCompanion2AlarmChannel_v3"
+    private val WARNING_CHANNEL_ID = "DeskCompanion2WarningChannel_v3"
     private val NOTIFICATION_ID = 8001
     private val ALARM_NOTIFICATION_ID = 8099
     private val DISCONNECT_NOTIF_ID = 8098
@@ -35,7 +35,10 @@ class DeskMonitorService : Service() {
     private var isAlarmActiveOnDesk = false
     private var isSnoozed = false
     private var lastHeartbeatTimestamp: Long = 0L
-    private var hasAlertedDisconnect = false
+
+    // Disconnect Timing & Escalation
+    private var disconnectStartTime: Long = 0L
+    private var lastReportedMinute: Int = -1
 
     private val SNOOZE_PERIOD_MS = 5 * 60 * 1000L
 
@@ -49,7 +52,7 @@ class DeskMonitorService : Service() {
     override fun onCreate() {
         super.onCreate()
         audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
-        createNotificationChannels()
+        createHighPriorityChannels()
         acquireServiceWakeLock()
 
         startForeground(NOTIFICATION_ID, buildPermanentNotification("Monitoring Desk Sentry..."))
@@ -58,10 +61,17 @@ class DeskMonitorService : Service() {
         startVolumeLockLoop()
     }
 
-    private fun createNotificationChannels() {
+    private fun createHighPriorityChannels() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val mgr = getSystemService(NotificationManager::class.java)
 
+            val soundUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
+            val audioAttr = AudioAttributes.Builder()
+                .setUsage(AudioAttributes.USAGE_NOTIFICATION_COMMUNICATION_INSTANT)
+                .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                .build()
+
+            // 1. Silent Ongoing Service
             val serviceChan = NotificationChannel(
                 CHANNEL_ID,
                 "Desk Monitor Permanent Service",
@@ -69,24 +79,31 @@ class DeskMonitorService : Service() {
             )
             mgr.createNotificationChannel(serviceChan)
 
+            // 2. Loud Emergency Breach Channel
             val alarmChan = NotificationChannel(
                 ALARM_CHANNEL_ID,
                 "Emergency Desk Breach Alarm",
                 NotificationManager.IMPORTANCE_HIGH
             ).apply {
                 enableVibration(true)
+                vibrationPattern = longArrayOf(0, 500, 200, 500)
                 setBypassDnd(true)
                 lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+                setSound(RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM), audioAttr)
             }
             mgr.createNotificationChannel(alarmChan)
 
+            // 3. High-Priority Warning & Disconnect Alerts with Sound + Vibration
             val warningChan = NotificationChannel(
                 WARNING_CHANNEL_ID,
-                "Heartbeat Warning Alerts",
+                "Desk Disconnection Alerts",
                 NotificationManager.IMPORTANCE_HIGH
             ).apply {
                 enableVibration(true)
+                vibrationPattern = longArrayOf(0, 400, 200, 400)
                 setBypassDnd(true)
+                lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+                setSound(soundUri, audioAttr)
             }
             mgr.createNotificationChannel(warningChan)
         }
@@ -154,12 +171,11 @@ class DeskMonitorService : Service() {
         dbRef.addValueEventListener(valueListener!!)
     }
 
-    // Fast 2-Second Heartbeat & Offline Disconnect Watchdog
     private fun startFastWatchdog() {
         handler.post(object : Runnable {
             override fun run() {
                 checkConnectionHealth()
-                handler.postDelayed(this, 2000)
+                handler.postDelayed(this, 2000) // Har 2 second me check
             }
         })
     }
@@ -173,31 +189,53 @@ class DeskMonitorService : Service() {
 
         if (isDisconnected) {
             isDeskConnected = false
-            if (!hasAlertedDisconnect) {
-                hasAlertedDisconnect = true
-                val reason = if (!hasInternet) "Companion Internet / Wi-Fi Disconnected!" else "Desk Camera Heartbeat Lost (>15s)!"
-                postDisconnectNotification(reason)
+
+            if (disconnectStartTime == 0L) {
+                // 1. Instant Disconnect Alert (0 Second)
+                disconnectStartTime = now
+                lastReportedMinute = 0
+                val reason = if (!hasInternet) "Wi-Fi / Mobile Data Disconnected on Companion Phone!" else "Desk Camera Heartbeat Lost (>15s)!"
+                postEscalatingNotification("⚠️ DESK DISCONNECTED (Just Now)", reason)
+            } else {
+                // 2. Periodic Escalating Warnings: 2 min, 5 min, 6 min, 10 min...
+                val elapsedMins = ((now - disconnectStartTime) / (60 * 1000)).toInt()
+                if (elapsedMins > 0 && elapsedMins != lastReportedMinute) {
+                    if (elapsedMins == 2 || elapsedMins == 5 || elapsedMins == 6 || elapsedMins % 5 == 0) {
+                        lastReportedMinute = elapsedMins
+                        val reason = "Desk has been disconnected for $elapsedMins minute(s)! Check camera phone & internet."
+                        postEscalatingNotification("⚠️ DESK STILL DISCONNECTED ($elapsedMins Mins)", reason)
+                    }
+                }
             }
         } else {
+            // Reconnected successfully
             isDeskConnected = true
-            if (hasAlertedDisconnect) {
-                hasAlertedDisconnect = false
+            if (disconnectStartTime != 0L) {
+                disconnectStartTime = 0L
+                lastReportedMinute = -1
                 cancelDisconnectNotification()
             }
         }
     }
 
-    private fun postDisconnectNotification(reason: String) {
+    private fun postEscalatingNotification(title: String, msg: String) {
         val mgr = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+
+        val soundUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
         val notif = NotificationCompat.Builder(this, WARNING_CHANNEL_ID)
-            .setContentTitle("⚠️ DESK DISCONNECTED!")
-            .setContentText(reason)
+            .setContentTitle(title)
+            .setContentText(msg)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(msg))
             .setSmallIcon(android.R.drawable.stat_notify_error)
-            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setPriority(NotificationCompat.PRIORITY_MAX)
             .setCategory(NotificationCompat.CATEGORY_ALARM)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .setSound(soundUri)
+            .setVibrate(longArrayOf(0, 400, 200, 400))
             .setOngoing(true)
             .setAutoCancel(false)
             .build()
+
         mgr.notify(DISCONNECT_NOTIF_ID, notif)
     }
 
@@ -230,7 +268,6 @@ class DeskMonitorService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        // Notification Action directly allows Snoozing without screen
         val snoozeIntent = Intent(this, DeskMonitorService::class.java).apply {
             action = ACTION_SNOOZE
         }
@@ -268,7 +305,6 @@ class DeskMonitorService : Service() {
             if (mediaPlayer == null) {
                 val alertUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
                     ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE)
-                    ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
 
                 mediaPlayer = MediaPlayer().apply {
                     setDataSource(applicationContext, alertUri)
@@ -338,9 +374,7 @@ class DeskMonitorService : Service() {
             }
             mediaPlayer?.release()
             mediaPlayer = null
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
+        } catch (e: Exception) {}
     }
 
     private fun dismissAlarmAndOverlay() {
