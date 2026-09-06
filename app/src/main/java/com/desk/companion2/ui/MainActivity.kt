@@ -1,10 +1,13 @@
 package com.desk.companion2.ui
 
+import android.Manifest
+import android.app.NotificationManager
 import android.app.admin.DevicePolicyManager
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
+import android.content.pm.PackageManager
 import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.graphics.Typeface
@@ -26,6 +29,8 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.*
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
 import com.desk.companion2.DeskConfig
 import com.desk.companion2.receivers.CompanionAdminReceiver
 import com.desk.companion2.service.DeskMonitorService
@@ -49,13 +54,14 @@ class MainActivity : AppCompatActivity() {
     private lateinit var tvPhotoPlaceholder: TextView
     private lateinit var tvPhotoTimestamp: TextView
 
-    // Emergency Snooze Banner in Dashboard
     private lateinit var bannerSnooze: LinearLayout
 
     // Checklist Views
     private lateinit var tvShieldTitle: TextView
     private lateinit var shieldCard: LinearLayout
     private lateinit var viewAllDoneCard: TextView
+    private lateinit var itemNotif: View
+    private lateinit var div0: View
     private lateinit var itemAdmin: View
     private lateinit var div1: View
     private lateinit var itemOverlay: View
@@ -71,6 +77,9 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         prefs = getSharedPreferences("DeskCompanionPrefs", Context.MODE_PRIVATE)
+
+        // Request Android 13+ Notification Permission on Launch
+        checkAndRequestNotificationPermission()
 
         val serviceIntent = Intent(this, DeskMonitorService::class.java)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -89,6 +98,14 @@ class MainActivity : AppCompatActivity() {
         refreshSecurityChecklistVisibility()
     }
 
+    private fun checkAndRequestNotificationPermission() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+                ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.POST_NOTIFICATIONS), 9901)
+            }
+        }
+    }
+
     private fun renderExecutiveDashboard() {
         val rootScroll = ScrollView(this).apply {
             layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
@@ -102,7 +119,7 @@ class MainActivity : AppCompatActivity() {
             setPadding(dp(20), dp(24), dp(20), dp(36))
         }
 
-        // EMERGENCY SNOOZE BANNER (Visible only when alarm is ringing)
+        // Emergency Snooze Banner
         bannerSnooze = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -145,7 +162,7 @@ class MainActivity : AppCompatActivity() {
         bannerSnooze.addView(btnBannerSnoozeAction)
         mainContainer.addView(bannerSnooze)
 
-        // 1. TOP HEADER (HARDCODED TARGET ID)
+        // 1. TOP HEADER
         val headerRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -320,7 +337,7 @@ class MainActivity : AppCompatActivity() {
         }
         mainContainer.addView(btnViewReports)
 
-        // 5. SECURITY CHECKLIST WIZARD (Items disappear as soon as granted)
+        // 5. SECURITY CHECKLIST WIZARD
         tvShieldTitle = TextView(this).apply {
             text = "🛡️ ANTI-TAMPER SECURITY CHECKLIST"
             setTextColor(Color.parseColor("#38BDF8"))
@@ -354,14 +371,20 @@ class MainActivity : AppCompatActivity() {
             layoutParams = params
         }
 
-        itemAdmin = createChecklistItem("1", "Device Admin", "Blocks student from uninstalling companion") { requestAdmin() }
+        itemNotif = createChecklistItem("1", "Allow Notifications", "Crucial for immediate breach & disconnect alerts") {
+            checkAndRequestNotificationPermission()
+        }
+        div0 = createDivider()
+        itemAdmin = createChecklistItem("2", "Device Admin", "Blocks student from uninstalling companion") { requestAdmin() }
         div1 = createDivider()
-        itemOverlay = createChecklistItem("2", "Display Over Apps", "Allows instant full-screen alarm trigger") { requestOverlayPermission() }
+        itemOverlay = createChecklistItem("3", "Display Over Apps", "Allows instant full-screen alarm trigger") { requestOverlayPermission() }
         div2 = createDivider()
-        itemAutostart = createChecklistItem("3", "Allow Autostart", "Enables auto-restart for MI / Oppo / Vivo") { openOemAutostartSettings() }
+        itemAutostart = createChecklistItem("4", "Allow Autostart", "Enables auto-restart for MI / Oppo / Vivo") { openOemAutostartSettings() }
         div3 = createDivider()
-        itemBattery = createChecklistItem("4", "No Battery Restrictions", "Stops system from putting socket to sleep") { requestIgnoreBatteryOptimization() }
+        itemBattery = createChecklistItem("5", "No Battery Restrictions", "Stops system from putting socket to sleep") { requestIgnoreBatteryOptimization() }
 
+        shieldCard.addView(itemNotif)
+        shieldCard.addView(div0)
         shieldCard.addView(itemAdmin)
         shieldCard.addView(div1)
         shieldCard.addView(itemOverlay)
@@ -393,7 +416,6 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun updateLiveStatusBadge() {
-        // Show emergency snooze banner if alarm is ringing
         if (DeskMonitorService.isCurrentlyRinging || isAlarmActiveOnServer) {
             bannerSnooze.visibility = View.VISIBLE
         } else {
@@ -405,7 +427,6 @@ class MainActivity : AppCompatActivity() {
         val diffSec = if (lastHeartbeatMs > 0L) (now - lastHeartbeatMs) / 1000 else 999L
 
         if (!hasNet || (lastHeartbeatMs > 0L && diffSec > 15L)) {
-            // Immediate Disconnect State
             tvStatusBadge.text = "○ DESK DISCONNECTED"
             tvStatusBadge.setTextColor(Color.parseColor("#EF4444"))
             tvStatusBadge.background = createPillDrawable(Color.parseColor("#3B0D0D"), Color.parseColor("#EF4444"))
@@ -430,18 +451,33 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun refreshSecurityChecklistVisibility() {
+        // 1. Notification Permission
+        val notifGranted = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+        } else {
+            val mgr = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            mgr.areNotificationsEnabled()
+        }
+
+        // 2. Admin
         val dpm = getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
         val adminComp = ComponentName(this, CompanionAdminReceiver::class.java)
         val isAdminActive = dpm.isAdminActive(adminComp)
 
+        // 3. Overlay
         val hasOverlay = Build.VERSION.SDK_INT < Build.VERSION_CODES.M || Settings.canDrawOverlays(this)
 
+        // 4. Battery
         val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
         val isNoBatteryRestrictions = Build.VERSION.SDK_INT < Build.VERSION_CODES.M || pm.isIgnoringBatteryOptimizations(packageName)
 
+        // 5. Autostart
         val isAutostartDone = prefs.getBoolean("autostart_configured", false)
 
-        // Toggle visibility: Hide completely if granted
+        // Toggle Views
+        itemNotif.visibility = if (notifGranted) View.GONE else View.VISIBLE
+        div0.visibility = itemNotif.visibility
+
         itemAdmin.visibility = if (isAdminActive) View.GONE else View.VISIBLE
         div1.visibility = itemAdmin.visibility
 
@@ -453,7 +489,7 @@ class MainActivity : AppCompatActivity() {
 
         itemBattery.visibility = if (isNoBatteryRestrictions) View.GONE else View.VISIBLE
 
-        val allGranted = isAdminActive && hasOverlay && isAutostartDone && isNoBatteryRestrictions
+        val allGranted = notifGranted && isAdminActive && hasOverlay && isAutostartDone && isNoBatteryRestrictions
         if (allGranted) {
             shieldCard.visibility = View.GONE
             tvShieldTitle.visibility = View.GONE
@@ -501,9 +537,7 @@ class MainActivity : AppCompatActivity() {
                         tvPhotoTimestamp.text = "● LIVE SNAPSHOT ($snapTimeStr)"
                         tvPhotoTimestamp.visibility = View.VISIBLE
                         btnRequestSnap.text = "🔄 Refresh Live Snapshot"
-                    } catch (e: Exception) {
-                        e.printStackTrace()
-                    }
+                    } catch (e: Exception) {}
                 }
             }
 
@@ -661,6 +695,11 @@ class MainActivity : AppCompatActivity() {
                 return
             } catch (_: Exception) {}
         }
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        refreshSecurityChecklistVisibility()
     }
 
     override fun onDestroy() {
