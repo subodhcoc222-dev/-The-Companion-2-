@@ -231,7 +231,6 @@ class EventsActivity : AppCompatActivity() {
             totalBreakSec += slotObj.optLong("officialBreakSec", 0L)
         }
 
-        // Summary Card (Teal Theme)
         val summaryCard = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(16, 12, 16, 12)
@@ -267,7 +266,6 @@ class EventsActivity : AppCompatActivity() {
         summaryCard.addView(tvAway)
         contentLayout.addView(summaryCard)
 
-        // Slots 1 to 5 Breakdown
         for (slotNum in 1..5) {
             val slotObj = slots.optJSONObject(slotNum.toString())
             val presentSec = slotObj?.optLong("presentSec", 0L) ?: 0L
