@@ -32,7 +32,6 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var dbRef: DatabaseReference
     private var valueListener: ValueEventListener? = null
-    private var connectionStateListener: ValueEventListener? = null
 
     private lateinit var tvStatusBadge: TextView
     private lateinit var tvBatteryValue: TextView
@@ -71,9 +70,7 @@ class MainActivity : AppCompatActivity() {
             setPadding(dp(20), dp(24), dp(20), dp(36))
         }
 
-        // ==========================================
         // 1. TOP HEADER (HARDCODED TARGET ID)
-        // ==========================================
         val headerRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -115,9 +112,7 @@ class MainActivity : AppCompatActivity() {
         headerRow.addView(tvStatusBadge)
         mainContainer.addView(headerRow)
 
-        // ==========================================
-        // 2. HARDWARE TELEMETRY GRID
-        // ==========================================
+        // 2. TELEMETRY CARDS
         val telemetryGrid = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             val params = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
@@ -125,7 +120,6 @@ class MainActivity : AppCompatActivity() {
             layoutParams = params
         }
 
-        // Battery Card
         val batteryCard = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             background = createCardDrawable(Color.parseColor("#131B2E"), Color.parseColor("#1E293B"))
@@ -156,7 +150,6 @@ class MainActivity : AppCompatActivity() {
         batteryCard.addView(tvBatteryValue)
         batteryCard.addView(tvBatterySub)
 
-        // Heartbeat Card
         val heartbeatCard = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             background = createCardDrawable(Color.parseColor("#131B2E"), Color.parseColor("#1E293B"))
@@ -191,9 +184,7 @@ class MainActivity : AppCompatActivity() {
         telemetryGrid.addView(heartbeatCard)
         mainContainer.addView(telemetryGrid)
 
-        // ==========================================
-        // 3. LIVE SNAPSHOT BUTTON & DIRECT WINDOW
-        // ==========================================
+        // 3. LIVE SNAPSHOT BUTTON & DIRECT VIEWFINDER
         btnRequestSnap = createModernButton("📸 Request Live Snapshot", Color.parseColor("#0284C7"), Color.WHITE).apply {
             val params = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(48))
             params.setMargins(0, 0, 0, dp(10))
@@ -243,9 +234,7 @@ class MainActivity : AppCompatActivity() {
         photoWindowFrame.addView(tvPhotoTimestamp)
         mainContainer.addView(photoWindowFrame)
 
-        // ==========================================
-        // 4. STUDY LOGS
-        // ==========================================
+        // 4. STUDY LOGS BUTTON
         val btnViewReports = createModernButton("📊 View Complete Study Logs", Color.parseColor("#0F766E"), Color.WHITE).apply {
             val params = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(48))
             params.setMargins(0, 0, 0, dp(20))
@@ -256,9 +245,7 @@ class MainActivity : AppCompatActivity() {
         }
         mainContainer.addView(btnViewReports)
 
-        // ==========================================
-        // 5. SECURITY CHECKLIST WIZARD
-        // ==========================================
+        // 5. SECURITY CHECKLIST
         val tvShieldTitle = TextView(this).apply {
             text = "🛡️ ANTI-TAMPER SECURITY CHECKLIST"
             setTextColor(Color.parseColor("#38BDF8"))
@@ -293,21 +280,6 @@ class MainActivity : AppCompatActivity() {
 
     private fun connectDirectlyToFirebase() {
         val db = FirebaseDatabase.getInstance()
-
-        // Connection Watchdog
-        connectionStateListener = object : ValueEventListener {
-            override fun onDataChange(snapshot: DataSnapshot) {
-                val isConnected = snapshot.getValue(Boolean::class.java) ?: false
-                if (!isConnected && tvStatusBadge.text == "● CONNECTING") {
-                    tvStatusBadge.text = "○ CHECKING NETWORK..."
-                    tvStatusBadge.setTextColor(Color.parseColor("#94A3B8"))
-                }
-            }
-            override fun onCancelled(error: DatabaseError) {}
-        }
-        db.getReference(".info/connected").addValueEventListener(connectionStateListener!!)
-
-        // Hardcoded Node Target Tracking
         dbRef = db.getReference(DeskConfig.FIREBASE_ROOT_NODE).child(DeskConfig.TARGET_DEVICE_ID)
 
         valueListener = object : ValueEventListener {
@@ -535,6 +507,5 @@ class MainActivity : AppCompatActivity() {
     override fun onDestroy() {
         super.onDestroy()
         valueListener?.let { dbRef.removeEventListener(it) }
-        connectionStateListener?.let { FirebaseDatabase.getInstance().getReference(".info/connected").removeEventListener(it) }
     }
 }
