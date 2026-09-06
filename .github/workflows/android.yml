@@ -21,15 +21,13 @@ jobs:
         java-version: '17'
         distribution: 'temurin'
 
-    - name: Setup Gradle Wrapper if Missing
-      run: |
-        if [ ! -f "gradlew" ]; then
-          gradle wrapper
-        fi
-        chmod +x gradlew
+    - name: Setup Compatible Gradle 8.4
+      uses: gradle/actions/setup-gradle@v3
+      with:
+        gradle-version: '8.4'
 
-    - name: Build Debug APK with Gradle
-      run: ./gradlew assembleDebug --stacktrace
+    - name: Build Debug APK
+      run: gradle assembleDebug --stacktrace
 
     - name: Upload Companion 2 APK
       uses: actions/upload-artifact@v4
