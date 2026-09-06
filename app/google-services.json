@@ -1,13 +1,13 @@
 {
   "project_info": {
-    "project_number": "100000000001",
-    "project_id": "desk-sentry-guard",
-    "storage_bucket": "desk-sentry-guard.appspot.com"
+    "project_number": "914757005633",
+    "project_id": "desk-sentry",
+    "storage_bucket": "desk-sentry.firebasestorage.app"
   },
   "client": [
     {
       "client_info": {
-        "mobilesdk_app_id": "1:100000000001:android:abcdef0123456789",
+        "mobilesdk_app_id": "1:914757005633:android:6ac42b81e374bf0551f1c0",
         "android_client_info": {
           "package_name": "com.desk.companion2"
         }
@@ -15,7 +15,26 @@
       "oauth_client": [],
       "api_key": [
         {
-          "current_key": "AIzaSyDummyKeyForSuccessfulBuildCompilation123"
+          "current_key": "AIzaSyB_coyP7i64qjMUpKyjnpIPGSnF9ayXMwM"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:914757005633:android:6ac42b81e374bf0551f1c0",
+        "android_client_info": {
+          "package_name": "com.desk.sentry"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyB_coyP7i64qjMUpKyjnpIPGSnF9ayXMwM"
         }
       ],
       "services": {
