@@ -8,12 +8,15 @@ import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.RippleDrawable
+import android.content.res.ColorStateList
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.PowerManager
 import android.provider.Settings
 import android.util.Base64
+import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.widget.*
@@ -28,16 +31,20 @@ import java.util.*
 class MainActivity : AppCompatActivity() {
 
     private lateinit var dbRef: DatabaseReference
-    private lateinit var tvConnectionStatus: TextView
-    private lateinit var tvBatteryText: TextView
-    private lateinit var tvHeartbeatText: TextView
+    private lateinit var tvStatusBadge: TextView
+    private lateinit var tvBatteryValue: TextView
+    private lateinit var tvBatterySub: TextView
+    private lateinit var tvHeartbeatValue: TextView
+    private lateinit var tvHeartbeatSub: TextView
     private lateinit var ivLivePhoto: ImageView
+    private lateinit var photoContainer: FrameLayout
     private lateinit var btnRequestSnap: Button
-    private lateinit var btnViewLogs: Button
+    private lateinit var tvPhotoTimestamp: TextView
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        // Persistent Background Service
         val serviceIntent = Intent(this, DeskMonitorService::class.java)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             startForegroundService(serviceIntent)
@@ -45,187 +52,288 @@ class MainActivity : AppCompatActivity() {
             startService(serviceIntent)
         }
 
-        buildDashboardUI()
-        initFirebaseListeners()
+        renderExecutiveDashboard()
+        initFirebaseLiveStream()
     }
 
-    private fun buildDashboardUI() {
-        val root = ScrollView(this).apply {
+    private fun renderExecutiveDashboard() {
+        val rootScroll = ScrollView(this).apply {
             layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
-            setBackgroundColor(Color.parseColor("#0F172A")) // Slate dark
+            setBackgroundColor(Color.parseColor("#0B0F19")) // Ultra Deep Obsidian Slate
             isFillViewport = true
+            overScrollMode = View.OVER_SCROLL_NEVER
         }
 
-        val container = LinearLayout(this).apply {
+        val mainContainer = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(24, 28, 24, 36)
+            setPadding(dp(20), dp(28), dp(20), dp(36))
         }
 
-        val tvTitle = TextView(this).apply {
-            text = "🛡️ Desk Companion 2"
-            setTextColor(Color.WHITE)
-            textSize = 20f
-            typeface = Typeface.DEFAULT_BOLD
-        }
-        val tvSub = TextView(this).apply {
-            text = "Paired with Desk ID: ${DeskConfig.TARGET_DEVICE_ID}"
-            setTextColor(Color.parseColor("#94A3B8"))
-            textSize = 12f
-            setPadding(0, 2, 0, 20)
+        // ==========================================
+        // 1. TOP HEADER & LIVE STATUS PILL
+        // ==========================================
+        val headerRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, 0, 0, dp(20))
         }
 
-        val statusCard = LinearLayout(this).apply {
+        val titleCol = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            background = GradientDrawable().apply {
-                setColor(Color.parseColor("#1E293B"))
-                cornerRadius = 14f
-            }
-            setPadding(20, 16, 20, 16)
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
         }
 
-        tvConnectionStatus = TextView(this).apply {
-            text = "Status: CONNECTING..."
-            setTextColor(Color.parseColor("#FBBF24"))
-            textSize = 15f
-            typeface = Typeface.DEFAULT_BOLD
-        }
-        tvBatteryText = TextView(this).apply {
-            text = "🔋 Camera Battery: --"
-            setTextColor(Color.parseColor("#E2E8F0"))
-            textSize = 13f
-            setPadding(0, 6, 0, 2)
-        }
-        tvHeartbeatText = TextView(this).apply {
-            text = "⏱️ Last Heartbeat: Waiting..."
-            setTextColor(Color.parseColor("#94A3B8"))
-            textSize = 12f
-        }
-
-        statusCard.addView(tvConnectionStatus)
-        statusCard.addView(tvBatteryText)
-        statusCard.addView(tvHeartbeatText)
-
-        btnRequestSnap = Button(this).apply {
-            text = "📸 Request Live Desk Photo"
+        val tvAppTitle = TextView(this).apply {
+            text = "Desk Companion"
             setTextColor(Color.WHITE)
-            setBackgroundColor(Color.parseColor("#0284C7"))
-            setPadding(0, 14, 0, 14)
+            textSize = 22f
+            typeface = Typeface.create("sans-serif-black", Typeface.BOLD)
+        }
+        val tvDeviceIdBadge = TextView(this).apply {
+            text = "TARGET: #${DeskConfig.TARGET_DEVICE_ID}"
+            setTextColor(Color.parseColor("#64748B"))
+            textSize = 11f
+            typeface = Typeface.MONOSPACE
+            setPadding(0, dp(2), 0, 0)
+        }
+        titleCol.addView(tvAppTitle)
+        titleCol.addView(tvDeviceIdBadge)
+
+        tvStatusBadge = TextView(this).apply {
+            text = "● CONNECTING"
+            setTextColor(Color.parseColor("#F59E0B"))
+            textSize = 11f
+            typeface = Typeface.DEFAULT_BOLD
+            background = createPillDrawable(Color.parseColor("#271C0C"), Color.parseColor("#F59E0B"))
+            setPadding(dp(12), dp(6), dp(12), dp(6))
+        }
+
+        headerRow.addView(titleCol)
+        headerRow.addView(tvStatusBadge)
+        mainContainer.addView(headerRow)
+
+        // ==========================================
+        // 2. TELEMETRY CARDS (2-COLUMN GRID)
+        // ==========================================
+        val telemetryGrid = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
             val params = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
-            params.setMargins(0, 18, 0, 12)
+            params.setMargins(0, 0, 0, dp(16))
+            layoutParams = params
+        }
+
+        // Battery Card
+        val batteryCard = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = createCardDrawable(Color.parseColor("#131B2E"), Color.parseColor("#1E293B"))
+            setPadding(dp(16), dp(16), dp(16), dp(16))
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
+                marginEnd = dp(8)
+            }
+        }
+        val tvBatIcon = TextView(this).apply {
+            text = "⚡ BATTERY"
+            setTextColor(Color.parseColor("#94A3B8"))
+            textSize = 11f
+            typeface = Typeface.DEFAULT_BOLD
+        }
+        tvBatteryValue = TextView(this).apply {
+            text = "--%"
+            setTextColor(Color.WHITE)
+            textSize = 24f
+            typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+            setPadding(0, dp(6), 0, dp(2))
+        }
+        tvBatterySub = TextView(this).apply {
+            text = "Checking power..."
+            setTextColor(Color.parseColor("#64748B"))
+            textSize = 11f
+        }
+        batteryCard.addView(tvBatIcon)
+        batteryCard.addView(tvBatteryValue)
+        batteryCard.addView(tvBatterySub)
+
+        // Heartbeat Card
+        val heartbeatCard = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = createCardDrawable(Color.parseColor("#131B2E"), Color.parseColor("#1E293B"))
+            setPadding(dp(16), dp(16), dp(16), dp(16))
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
+                marginStart = dp(8)
+            }
+        }
+        val tvHbIcon = TextView(this).apply {
+            text = "⏱ HEARTBEAT"
+            setTextColor(Color.parseColor("#94A3B8"))
+            textSize = 11f
+            typeface = Typeface.DEFAULT_BOLD
+        }
+        tvHeartbeatValue = TextView(this).apply {
+            text = "--"
+            setTextColor(Color.WHITE)
+            textSize = 18f
+            typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+            setPadding(0, dp(10), 0, dp(4))
+        }
+        tvHeartbeatSub = TextView(this).apply {
+            text = "Standby"
+            setTextColor(Color.parseColor("#64748B"))
+            textSize = 11f
+        }
+        heartbeatCard.addView(tvHbIcon)
+        heartbeatCard.addView(tvHeartbeatValue)
+        heartbeatCard.addView(tvHeartbeatSub)
+
+        telemetryGrid.addView(batteryCard)
+        telemetryGrid.addView(heartbeatCard)
+        mainContainer.addView(telemetryGrid)
+
+        // ==========================================
+        // 3. ACTION BUTTONS (SNAPSHOT & REPORTS)
+        // ==========================================
+        btnRequestSnap = createModernButton("📸 Request Live Snapshot", Color.parseColor("#0284C7"), Color.WHITE).apply {
+            val params = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(50))
+            params.setMargins(0, 0, 0, dp(10))
             layoutParams = params
             setOnClickListener { requestSnapshot() }
         }
+        mainContainer.addView(btnRequestSnap)
 
-        ivLivePhoto = ImageView(this).apply {
-            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 500)
-            setBackgroundColor(Color.parseColor("#1E293B"))
-            scaleType = ImageView.ScaleType.CENTER_CROP
-            visibility = View.GONE
-        }
-
-        btnViewLogs = Button(this).apply {
-            text = "📊 View Study Logs & History"
-            setTextColor(Color.WHITE)
-            setBackgroundColor(Color.parseColor("#0F766E"))
-            val params = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
-            params.setMargins(0, 14, 0, 24)
+        val btnViewReports = createModernButton("📊 View Complete Study Logs", Color.parseColor("#0F766E"), Color.WHITE).apply {
+            val params = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(50))
+            params.setMargins(0, 0, 0, dp(20))
             layoutParams = params
             setOnClickListener {
                 startActivity(Intent(this@MainActivity, EventsActivity::class.java))
             }
         }
+        mainContainer.addView(btnViewReports)
 
-        val tvSetupHeader = TextView(this).apply {
-            text = "🔒 System Anti-Tamper Setup"
-            setTextColor(Color.parseColor("#38BDF8"))
-            textSize = 14f
+        // ==========================================
+        // 4. LIVE SNAPSHOT VIEWFINDER FRAME
+        // ==========================================
+        photoContainer = FrameLayout(this).apply {
+            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(240)).apply {
+                setMargins(0, 0, 0, dp(24))
+            }
+            background = createCardDrawable(Color.parseColor("#0F172A"), Color.parseColor("#334155"))
+            visibility = View.GONE
+        }
+
+        ivLivePhoto = ImageView(this).apply {
+            layoutParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
+            scaleType = ImageView.ScaleType.CENTER_CROP
+        }
+
+        tvPhotoTimestamp = TextView(this).apply {
+            text = "● LIVE CAPTURE"
+            setTextColor(Color.WHITE)
+            textSize = 10f
             typeface = Typeface.DEFAULT_BOLD
-            setPadding(0, 12, 0, 10)
+            background = createPillDrawable(Color.parseColor("#B91C1C"), Color.TRANSPARENT)
+            setPadding(dp(8), dp(4), dp(8), dp(4))
+            val p = FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT).apply {
+                gravity = Gravity.BOTTOM or Gravity.START
+                setMargins(dp(12), 0, 0, dp(12))
+            }
+            layoutParams = p
         }
 
-        val btnAdmin = Button(this).apply {
-            text = "1. Enable Device Admin (Anti-Uninstall)"
-            setTextColor(Color.WHITE)
-            setBackgroundColor(Color.parseColor("#334155"))
-            setOnClickListener { requestAdmin() }
+        photoContainer.addView(ivLivePhoto)
+        photoContainer.addView(tvPhotoTimestamp)
+        mainContainer.addView(photoContainer)
+
+        // ==========================================
+        // 5. SECURITY SHIELD CHECKLIST WIZARD
+        // ==========================================
+        val tvShieldTitle = TextView(this).apply {
+            text = "🛡️ PARENT SECURITY CHECKLIST"
+            setTextColor(Color.parseColor("#38BDF8"))
+            textSize = 12f
+            typeface = Typeface.DEFAULT_BOLD
+            setPadding(0, dp(8), 0, dp(10))
+        }
+        mainContainer.addView(tvShieldTitle)
+
+        val shieldCard = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = createCardDrawable(Color.parseColor("#131B2E"), Color.parseColor("#1E293B"))
+            setPadding(dp(16), dp(10), dp(16), dp(10))
+            val params = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+            params.setMargins(0, 0, 0, dp(16))
+            layoutParams = params
         }
 
-        val btnOverlay = Button(this).apply {
-            text = "2. Allow Display Over Apps (Alarm Popup)"
-            setTextColor(Color.WHITE)
-            setBackgroundColor(Color.parseColor("#334155"))
-            setOnClickListener { requestOverlayPermission() }
-        }
+        shieldCard.addView(createChecklistItem("1", "Device Admin", "Prevents student from uninstalling app") { requestAdmin() })
+        shieldCard.addView(createDivider())
+        shieldCard.addView(createChecklistItem("2", "Display Over Apps", "Required to force red alert over screen") { requestOverlayPermission() })
+        shieldCard.addView(createDivider())
+        shieldCard.addView(createChecklistItem("3", "Allow Autostart", "Crucial for MI / Oppo / Vivo background restart") { openOemAutostartSettings() })
+        shieldCard.addView(createDivider())
+        shieldCard.addView(createChecklistItem("4", "Disable Battery Saver", "Select 'No Restrictions' to stop sleep killer") { requestIgnoreBatteryOptimization() })
 
-        val btnOemAutostart = Button(this).apply {
-            text = "3. Enable Autostart (MI / Oppo / Vivo)"
-            setTextColor(Color.WHITE)
-            setBackgroundColor(Color.parseColor("#334155"))
-            setOnClickListener { openOemAutostartSettings() }
-        }
+        mainContainer.addView(shieldCard)
 
-        val btnBatterySaver = Button(this).apply {
-            text = "4. Battery Saver: No Restrictions"
-            setTextColor(Color.WHITE)
-            setBackgroundColor(Color.parseColor("#334155"))
-            setOnClickListener { requestIgnoreBatteryOptimization() }
-        }
-
-        container.addView(tvTitle)
-        container.addView(tvSub)
-        container.addView(statusCard)
-        container.addView(btnRequestSnap)
-        container.addView(ivLivePhoto)
-        container.addView(btnViewLogs)
-        container.addView(tvSetupHeader)
-        container.addView(btnAdmin)
-        container.addView(btnOverlay)
-        container.addView(btnOemAutostart)
-        container.addView(btnBatterySaver)
-
-        root.addView(container)
-        setContentView(root)
+        rootScroll.addView(mainContainer)
+        setContentView(rootScroll)
     }
 
-    private fun initFirebaseListeners() {
+    private fun initFirebaseLiveStream() {
         dbRef = FirebaseDatabase.getInstance()
             .getReference(DeskConfig.FIREBASE_ROOT_NODE)
             .child(DeskConfig.TARGET_DEVICE_ID)
 
         dbRef.addValueEventListener(object : ValueEventListener {
             override fun onDataChange(snapshot: DataSnapshot) {
+                // Status Update
                 val status = snapshot.child("status").getValue(String::class.java) ?: "OFFLINE"
                 val isAlarm = snapshot.child("alarm_active").getValue(Boolean::class.java) ?: false
 
-                if (isAlarm) {
-                    tvConnectionStatus.text = "Status: 🚨 ALARM RINGING (BREACH)"
-                    tvConnectionStatus.setTextColor(Color.parseColor("#EF4444"))
-                } else if (status == "ONLINE") {
-                    tvConnectionStatus.text = "Status: ● ONLINE (Protected)"
-                    tvConnectionStatus.setTextColor(Color.parseColor("#22C55E"))
-                } else {
-                    tvConnectionStatus.text = "Status: ○ OFFLINE"
-                    tvConnectionStatus.setTextColor(Color.GRAY)
+                when {
+                    isAlarm -> {
+                        tvStatusBadge.text = "● BREACH ALARM ACTIVE"
+                        tvStatusBadge.setTextColor(Color.parseColor("#EF4444"))
+                        tvStatusBadge.background = createPillDrawable(Color.parseColor("#3B0D0D"), Color.parseColor("#EF4444"))
+                    }
+                    status == "ONLINE" -> {
+                        tvStatusBadge.text = "● DESK PROTECTED"
+                        tvStatusBadge.setTextColor(Color.parseColor("#22C55E"))
+                        tvStatusBadge.background = createPillDrawable(Color.parseColor("#052E16"), Color.parseColor("#22C55E"))
+                    }
+                    else -> {
+                        tvStatusBadge.text = "○ DESK OFFLINE"
+                        tvStatusBadge.setTextColor(Color.parseColor("#94A3B8"))
+                        tvStatusBadge.background = createPillDrawable(Color.parseColor("#1E293B"), Color.parseColor("#475569"))
+                    }
                 }
 
+                // Battery Update
                 val bat = snapshot.child("battery_level").getValue(Int::class.java) ?: -1
                 val charging = snapshot.child("is_charging").getValue(Boolean::class.java) ?: false
-                tvBatteryText.text = "🔋 Camera Battery: $bat% ${if (charging) "⚡ (Charging)" else ""}"
-
-                val lastBeat = snapshot.child("last_heartbeat").getValue(Long::class.java) ?: 0L
-                if (lastBeat > 0) {
-                    val timeStr = SimpleDateFormat("hh:mm:ss a", Locale.getDefault()).format(Date(lastBeat))
-                    val diffSec = (System.currentTimeMillis() - lastBeat) / 1000
-                    tvHeartbeatText.text = "⏱️ Last Beat: $timeStr (${diffSec}s ago)"
+                if (bat >= 0) {
+                    tvBatteryValue.text = "$bat%"
+                    tvBatterySub.text = if (charging) "⚡ Power Cable Plugged" else "Discharging"
+                    tvBatterySub.setTextColor(if (charging) Color.parseColor("#38BDF8") else Color.parseColor("#94A3B8"))
                 }
 
+                // Heartbeat Update
+                val lastBeat = snapshot.child("last_heartbeat").getValue(Long::class.java) ?: 0L
+                if (lastBeat > 0) {
+                    val diffSec = (System.currentTimeMillis() - lastBeat) / 1000
+                    tvHeartbeatValue.text = if (diffSec < 60) "${diffSec}s ago" else "${diffSec / 60}m ago"
+                    val timeFormatted = SimpleDateFormat("hh:mm:ss a", Locale.getDefault()).format(Date(lastBeat))
+                    tvHeartbeatSub.text = timeFormatted
+                }
+
+                // Photo Update
                 val base64Img = snapshot.child("latest_snapshot_base64").getValue(String::class.java)
                 if (!base64Img.isNullOrEmpty()) {
                     try {
                         val decodedBytes = Base64.decode(base64Img, Base64.DEFAULT)
                         val bmp = BitmapFactory.decodeByteArray(decodedBytes, 0, decodedBytes.size)
                         ivLivePhoto.setImageBitmap(bmp)
-                        ivLivePhoto.visibility = View.VISIBLE
+                        photoContainer.visibility = View.VISIBLE
+                        btnRequestSnap.text = "🔄 Refresh Live Snapshot"
                     } catch (e: Exception) {
                         e.printStackTrace()
                     }
@@ -236,16 +344,121 @@ class MainActivity : AppCompatActivity() {
         })
     }
 
+    // ==========================================
+    // UI HELPER METHODS (EXECUTIVE DESIGN SYSTEM)
+    // ==========================================
+    private fun createCardDrawable(bgColor: Int, strokeColor: Int): GradientDrawable {
+        return GradientDrawable().apply {
+            setColor(bgColor)
+            cornerRadius = dp(14).toFloat()
+            setStroke(dp(1), strokeColor)
+        }
+    }
+
+    private fun createPillDrawable(bgColor: Int, strokeColor: Int): GradientDrawable {
+        return GradientDrawable().apply {
+            setColor(bgColor)
+            cornerRadius = dp(20).toFloat()
+            if (strokeColor != Color.TRANSPARENT) setStroke(dp(1), strokeColor)
+        }
+    }
+
+    private fun createModernButton(text: String, bgTint: Int, txtColor: Int): Button {
+        return Button(this).apply {
+            this.text = text
+            setTextColor(txtColor)
+            textSize = 14f
+            typeface = Typeface.DEFAULT_BOLD
+            isAllCaps = false
+            val shape = GradientDrawable().apply {
+                setColor(bgTint)
+                cornerRadius = dp(12).toFloat()
+            }
+            background = RippleDrawable(ColorStateList.valueOf(Color.parseColor("#33FFFFFF")), shape, null)
+        }
+    }
+
+    private fun createChecklistItem(number: String, title: String, subtitle: String, onClick: () -> Unit): View {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, dp(12), 0, dp(12))
+            isClickable = true
+            isFocusable = true
+            val outValue = android.util.TypedValue()
+            context.theme.resolveAttribute(android.R.attr.selectableItemBackground, outValue, true)
+            setBackgroundResource(outValue.resourceId)
+            setOnClickListener { onClick() }
+        }
+
+        val badge = TextView(this).apply {
+            text = number
+            setTextColor(Color.WHITE)
+            textSize = 11f
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            background = createPillDrawable(Color.parseColor("#1E293B"), Color.parseColor("#38BDF8"))
+            layoutParams = LinearLayout.LayoutParams(dp(26), dp(26)).apply {
+                marginEnd = dp(12)
+            }
+        }
+
+        val textCol = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        }
+
+        val tvMain = TextView(this).apply {
+            text = title
+            setTextColor(Color.WHITE)
+            textSize = 13f
+            typeface = Typeface.DEFAULT_BOLD
+        }
+        val tvSub = TextView(this).apply {
+            text = subtitle
+            setTextColor(Color.parseColor("#94A3B8"))
+            textSize = 11f
+            setPadding(0, dp(2), 0, 0)
+        }
+        textCol.addView(tvMain)
+        textCol.addView(tvSub)
+
+        val tvArrow = TextView(this).apply {
+            text = "›"
+            setTextColor(Color.parseColor("#64748B"))
+            textSize = 20f
+            typeface = Typeface.DEFAULT_BOLD
+            setPadding(dp(8), 0, dp(4), 0)
+        }
+
+        row.addView(badge)
+        row.addView(textCol)
+        row.addView(tvArrow)
+        return row
+    }
+
+    private fun createDivider(): View {
+        return View(this).apply {
+            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(1))
+            setBackgroundColor(Color.parseColor("#1E293B"))
+        }
+    }
+
+    private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
+
+    // ==========================================
+    // ACTION TRIGGERS
+    // ==========================================
     private fun requestSnapshot() {
         dbRef.child("commands").child("request_snap").setValue(true)
-        Toast.makeText(this, "Requested photo from camera phone...", Toast.LENGTH_SHORT).show()
+        Toast.makeText(this, "Requesting photo from Camera Stand...", Toast.LENGTH_SHORT).show()
     }
 
     private fun requestAdmin() {
         val comp = ComponentName(this, CompanionAdminReceiver::class.java)
         val intent = Intent(DevicePolicyManager.ACTION_ADD_DEVICE_ADMIN).apply {
             putExtra(DevicePolicyManager.EXTRA_DEVICE_ADMIN, comp)
-            putExtra(DevicePolicyManager.EXTRA_ADD_EXPLANATION, "Protects Companion 2 from uninstallation.")
+            putExtra(DevicePolicyManager.EXTRA_ADD_EXPLANATION, "Locks app against removal by student.")
         }
         startActivity(intent)
     }
@@ -254,7 +467,7 @@ class MainActivity : AppCompatActivity() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.canDrawOverlays(this)) {
             startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
         } else {
-            Toast.makeText(this, "Overlay permission already granted!", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "Display Overlay already authorized ✓", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -264,7 +477,7 @@ class MainActivity : AppCompatActivity() {
             if (!pm.isIgnoringBatteryOptimizations(packageName)) {
                 startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName")))
             } else {
-                Toast.makeText(this, "Battery optimization already set to No Restrictions!", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, "Battery is set to 'No Restrictions' ✓", Toast.LENGTH_SHORT).show()
             }
         }
     }
