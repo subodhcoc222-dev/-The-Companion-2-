@@ -7,6 +7,8 @@ import android.media.AudioAttributes
 import android.media.AudioManager
 import android.media.MediaPlayer
 import android.media.RingtoneManager
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.os.*
 import androidx.core.app.NotificationCompat
 import com.desk.companion2.DeskConfig
@@ -21,6 +23,7 @@ class DeskMonitorService : Service() {
     private val WARNING_CHANNEL_ID = "DeskCompanion2WarningChannel"
     private val NOTIFICATION_ID = 8001
     private val ALARM_NOTIFICATION_ID = 8099
+    private val DISCONNECT_NOTIF_ID = 8098
 
     private lateinit var dbRef: DatabaseReference
     private var valueListener: ValueEventListener? = null
@@ -31,15 +34,16 @@ class DeskMonitorService : Service() {
 
     private var isAlarmActiveOnDesk = false
     private var isSnoozed = false
-    private var isCurrentlyRinging = false
     private var lastHeartbeatTimestamp: Long = 0L
+    private var hasAlertedDisconnect = false
 
-    private var lastSentWarningMinute = -1
     private val SNOOZE_PERIOD_MS = 5 * 60 * 1000L
 
     companion object {
         const val ACTION_SNOOZE = "ACTION_SNOOZE"
         var isOverlayVisible = false
+        var isCurrentlyRinging = false
+        var isDeskConnected = false
     }
 
     override fun onCreate() {
@@ -50,7 +54,7 @@ class DeskMonitorService : Service() {
 
         startForeground(NOTIFICATION_ID, buildPermanentNotification("Monitoring Desk Sentry..."))
         connectDirectlyToFirebase()
-        startHeartbeatWatchdog()
+        startFastWatchdog()
         startVolumeLockLoop()
     }
 
@@ -58,7 +62,6 @@ class DeskMonitorService : Service() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val mgr = getSystemService(NotificationManager::class.java)
 
-            // 1. Silent Service Channel
             val serviceChan = NotificationChannel(
                 CHANNEL_ID,
                 "Desk Monitor Permanent Service",
@@ -66,7 +69,6 @@ class DeskMonitorService : Service() {
             )
             mgr.createNotificationChannel(serviceChan)
 
-            // 2. High-Priority Alarm Channel with Heads-up popup
             val alarmChan = NotificationChannel(
                 ALARM_CHANNEL_ID,
                 "Emergency Desk Breach Alarm",
@@ -78,13 +80,13 @@ class DeskMonitorService : Service() {
             }
             mgr.createNotificationChannel(alarmChan)
 
-            // 3. Heartbeat Warnings
             val warningChan = NotificationChannel(
                 WARNING_CHANNEL_ID,
                 "Heartbeat Warning Alerts",
                 NotificationManager.IMPORTANCE_HIGH
             ).apply {
                 enableVibration(true)
+                setBypassDnd(true)
             }
             mgr.createNotificationChannel(warningChan)
         }
@@ -114,11 +116,11 @@ class DeskMonitorService : Service() {
         return hour >= 22 || hour < 5
     }
 
-    private fun isMorningGraceWindow(): Boolean {
-        val cal = Calendar.getInstance()
-        val hour = cal.get(Calendar.HOUR_OF_DAY)
-        val minute = cal.get(Calendar.MINUTE)
-        return hour == 5 && minute in 0..9
+    private fun isCompanionOnline(): Boolean {
+        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        val net = cm.activeNetwork ?: return false
+        val caps = cm.getNetworkCapabilities(net) ?: return false
+        return caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
     }
 
     private fun connectDirectlyToFirebase() {
@@ -152,62 +154,56 @@ class DeskMonitorService : Service() {
         dbRef.addValueEventListener(valueListener!!)
     }
 
-    private fun startHeartbeatWatchdog() {
+    // Fast 2-Second Heartbeat & Offline Disconnect Watchdog
+    private fun startFastWatchdog() {
         handler.post(object : Runnable {
             override fun run() {
-                checkHeartbeatState()
-                handler.postDelayed(this, 10000)
+                checkConnectionHealth()
+                handler.postDelayed(this, 2000)
             }
         })
     }
 
-    private fun checkHeartbeatState() {
-        if (lastHeartbeatTimestamp == 0L) return
+    private fun checkConnectionHealth() {
+        val now = System.currentTimeMillis()
+        val hasInternet = isCompanionOnline()
+        val heartbeatAgeSec = if (lastHeartbeatTimestamp > 0L) (now - lastHeartbeatTimestamp) / 1000 else 999L
 
-        val diffMs = System.currentTimeMillis() - lastHeartbeatTimestamp
-        val elapsedMins = (diffMs / (60 * 1000)).toInt()
+        val isDisconnected = !hasInternet || (lastHeartbeatTimestamp > 0L && heartbeatAgeSec > 15L)
 
-        if (isNightWindow()) {
-            if (elapsedMins >= 10 && !isOverlayVisible) {
-                launchOverlay("⚠️ Night Notice: Camera Phone is Offline / Powered Off.")
-            }
-            return
-        }
-
-        if (isMorningGraceWindow()) {
-            val cal = Calendar.getInstance()
-            val min = cal.get(Calendar.MINUTE)
-            if (min % 2 == 0 && min != lastSentWarningMinute) {
-                lastSentWarningMinute = min
-                postWarningNotification("Camera Phone Offline during morning grace (${10 - min} mins left).")
-            }
-            return
-        }
-
-        if (elapsedMins in 2..10) {
-            if (elapsedMins % 2 == 0 && elapsedMins != lastSentWarningMinute) {
-                lastSentWarningMinute = elapsedMins
-                postWarningNotification("Heartbeat Missed: Camera phone offline or net cut ($elapsedMins mins).")
-            }
-        } else if (elapsedMins > 10) {
-            if (!isCurrentlyRinging && !isSnoozed) {
-                triggerAlarm("⚠️ CRITICAL: Camera phone offline or powered off for >10 mins!")
+        if (isDisconnected) {
+            isDeskConnected = false
+            if (!hasAlertedDisconnect) {
+                hasAlertedDisconnect = true
+                val reason = if (!hasInternet) "Companion Internet / Wi-Fi Disconnected!" else "Desk Camera Heartbeat Lost (>15s)!"
+                postDisconnectNotification(reason)
             }
         } else {
-            lastSentWarningMinute = -1
+            isDeskConnected = true
+            if (hasAlertedDisconnect) {
+                hasAlertedDisconnect = false
+                cancelDisconnectNotification()
+            }
         }
     }
 
-    private fun postWarningNotification(msg: String) {
+    private fun postDisconnectNotification(reason: String) {
         val mgr = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         val notif = NotificationCompat.Builder(this, WARNING_CHANNEL_ID)
-            .setContentTitle("⚠️ Desk Sentry Heartbeat Warning")
-            .setContentText(msg)
+            .setContentTitle("⚠️ DESK DISCONNECTED!")
+            .setContentText(reason)
             .setSmallIcon(android.R.drawable.stat_notify_error)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
-            .setAutoCancel(true)
+            .setCategory(NotificationCompat.CATEGORY_ALARM)
+            .setOngoing(true)
+            .setAutoCancel(false)
             .build()
-        mgr.notify(8002, notif)
+        mgr.notify(DISCONNECT_NOTIF_ID, notif)
+    }
+
+    private fun cancelDisconnectNotification() {
+        val mgr = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        mgr.cancel(DISCONNECT_NOTIF_ID)
     }
 
     private fun triggerAlarm(reason: String) {
@@ -219,11 +215,6 @@ class DeskMonitorService : Service() {
         }
     }
 
-    /**
-     * Bulletproof Overlay Launcher:
-     * 1. Uses High-Priority FullScreenIntent Notification (works even when phone is locked/asleep)
-     * 2. Calls startActivity directly as a fallback
-     */
     private fun launchOverlay(reason: String) {
         isOverlayVisible = true
 
@@ -239,6 +230,17 @@ class DeskMonitorService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
+        // Notification Action directly allows Snoozing without screen
+        val snoozeIntent = Intent(this, DeskMonitorService::class.java).apply {
+            action = ACTION_SNOOZE
+        }
+        val snoozePendingIntent = PendingIntent.getService(
+            this,
+            1002,
+            snoozeIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
         val alarmNotif = NotificationCompat.Builder(this, ALARM_CHANNEL_ID)
             .setContentTitle("🚨 STUDY BREACH DETECTED!")
             .setContentText(reason)
@@ -247,6 +249,7 @@ class DeskMonitorService : Service() {
             .setCategory(NotificationCompat.CATEGORY_ALARM)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setFullScreenIntent(pendingIntent, true)
+            .addAction(android.R.drawable.ic_lock_idle_alarm, "SNOOZE (5 MINS)", snoozePendingIntent)
             .setAutoCancel(false)
             .setOngoing(true)
             .build()
