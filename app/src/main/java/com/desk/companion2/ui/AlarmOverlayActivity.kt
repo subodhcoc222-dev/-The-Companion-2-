@@ -26,7 +26,6 @@ class AlarmOverlayActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // Screen On & Lockscreen Dismissal (Android 8 to 14)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
             setShowWhenLocked(true)
             setTurnScreenOn(true)
@@ -101,7 +100,6 @@ class AlarmOverlayActivity : AppCompatActivity() {
         root.addView(btnSnooze)
         setContentView(root)
 
-        // Safe Receiver Registration (Fixes Android 14 SecurityException Crash)
         closeReceiver = object : BroadcastReceiver() {
             override fun onReceive(context: Context?, intent: Intent?) {
                 finish()
@@ -115,11 +113,22 @@ class AlarmOverlayActivity : AppCompatActivity() {
         }
     }
 
+    // If User presses Home or changes task while ringing, force overlay back to front
+    override fun onUserLeaveHint() {
+        super.onUserLeaveHint()
+        if (DeskMonitorService.isCurrentlyRinging) {
+            val relaunch = Intent(this, AlarmOverlayActivity::class.java).apply {
+                addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+            }
+            startActivity(relaunch)
+        }
+    }
+
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
 
     @Deprecated("Deprecated in Java")
     override fun onBackPressed() {
-        // Prevent dismissal with back button
+        // Block back button from dismissing the screen
     }
 
     override fun onDestroy() {
