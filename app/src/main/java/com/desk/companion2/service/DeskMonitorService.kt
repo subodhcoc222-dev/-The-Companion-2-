@@ -20,7 +20,7 @@ class DeskMonitorService : Service() {
     private val WARNING_CHANNEL_ID = "DeskCompanion2WarningChannel"
     private val NOTIFICATION_ID = 8001
 
-    private var dbRef: DatabaseReference? = null
+    private lateinit var dbRef: DatabaseReference
     private var valueListener: ValueEventListener? = null
     private var mediaPlayer: MediaPlayer? = null
     private var wakeLock: PowerManager.WakeLock? = null
@@ -47,7 +47,7 @@ class DeskMonitorService : Service() {
         acquireServiceWakeLock()
 
         startForeground(NOTIFICATION_ID, buildPermanentNotification("Monitoring Desk Sentry..."))
-        connectToFirebase()
+        connectDirectlyToFirebase()
         startHeartbeatWatchdog()
         startVolumeLockLoop()
     }
@@ -105,13 +105,10 @@ class DeskMonitorService : Service() {
         return hour == 5 && minute in 0..9
     }
 
-    private fun connectToFirebase() {
-        valueListener?.let { dbRef?.removeEventListener(it) }
-
-        val targetId = DeskConfig.getTargetDeviceId(this)
+    private fun connectDirectlyToFirebase() {
         dbRef = FirebaseDatabase.getInstance()
             .getReference(DeskConfig.FIREBASE_ROOT_NODE)
-            .child(targetId)
+            .child(DeskConfig.TARGET_DEVICE_ID)
 
         valueListener = object : ValueEventListener {
             override fun onDataChange(snapshot: DataSnapshot) {
@@ -136,7 +133,7 @@ class DeskMonitorService : Service() {
 
             override fun onCancelled(error: DatabaseError) {}
         }
-        dbRef?.addValueEventListener(valueListener!!)
+        dbRef.addValueEventListener(valueListener!!)
     }
 
     private fun startHeartbeatWatchdog() {
@@ -267,7 +264,7 @@ class DeskMonitorService : Service() {
 
         handler.postDelayed({
             isSnoozed = false
-            dbRef?.get()?.addOnSuccessListener { snapshot ->
+            dbRef.get().addOnSuccessListener { snapshot ->
                 val deskAlarm = snapshot.child("alarm_active").getValue(Boolean::class.java) ?: false
                 val diffMs = System.currentTimeMillis() - lastHeartbeatTimestamp
                 val elapsedMins = (diffMs / (60 * 1000)).toInt()
@@ -301,8 +298,6 @@ class DeskMonitorService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_SNOOZE) {
             snoozeAlarm()
-        } else {
-            connectToFirebase()
         }
         return START_STICKY
     }
@@ -311,7 +306,7 @@ class DeskMonitorService : Service() {
 
     override fun onDestroy() {
         super.onDestroy()
-        valueListener?.let { dbRef?.removeEventListener(it) }
+        valueListener?.let { dbRef.removeEventListener(it) }
         wakeLock?.let { if (it.isHeld) it.release() }
         val restartIntent = Intent(applicationContext, DeskMonitorService::class.java)
         startService(restartIntent)
