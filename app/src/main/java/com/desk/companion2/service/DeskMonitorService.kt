@@ -17,8 +17,10 @@ import java.util.Calendar
 class DeskMonitorService : Service() {
 
     private val CHANNEL_ID = "DeskCompanion2ServiceChannel"
+    private val ALARM_CHANNEL_ID = "DeskCompanion2AlarmChannel"
     private val WARNING_CHANNEL_ID = "DeskCompanion2WarningChannel"
     private val NOTIFICATION_ID = 8001
+    private val ALARM_NOTIFICATION_ID = 8099
 
     private lateinit var dbRef: DatabaseReference
     private var valueListener: ValueEventListener? = null
@@ -56,6 +58,7 @@ class DeskMonitorService : Service() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val mgr = getSystemService(NotificationManager::class.java)
 
+            // 1. Silent Service Channel
             val serviceChan = NotificationChannel(
                 CHANNEL_ID,
                 "Desk Monitor Permanent Service",
@@ -63,6 +66,19 @@ class DeskMonitorService : Service() {
             )
             mgr.createNotificationChannel(serviceChan)
 
+            // 2. High-Priority Alarm Channel with Heads-up popup
+            val alarmChan = NotificationChannel(
+                ALARM_CHANNEL_ID,
+                "Emergency Desk Breach Alarm",
+                NotificationManager.IMPORTANCE_HIGH
+            ).apply {
+                enableVibration(true)
+                setBypassDnd(true)
+                lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+            }
+            mgr.createNotificationChannel(alarmChan)
+
+            // 3. Heartbeat Warnings
             val warningChan = NotificationChannel(
                 WARNING_CHANNEL_ID,
                 "Heartbeat Warning Alerts",
@@ -121,7 +137,7 @@ class DeskMonitorService : Service() {
 
                 if (isAlarmActiveOnDesk) {
                     if (!isCurrentlyRinging && !isSnoozed) {
-                        triggerAlarm("⚠️ STUDY BREACH! Left Desk / Buffer Expired.")
+                        triggerAlarm("⚠️ STUDY BREACH! Student Left Desk.")
                     }
                 } else {
                     if (isCurrentlyRinging || isOverlayVisible) {
@@ -203,13 +219,44 @@ class DeskMonitorService : Service() {
         }
     }
 
+    /**
+     * Bulletproof Overlay Launcher:
+     * 1. Uses High-Priority FullScreenIntent Notification (works even when phone is locked/asleep)
+     * 2. Calls startActivity directly as a fallback
+     */
     private fun launchOverlay(reason: String) {
         isOverlayVisible = true
-        val intent = Intent(this, AlarmOverlayActivity::class.java).apply {
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+
+        val overlayIntent = Intent(this, AlarmOverlayActivity::class.java).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
             putExtra("EXTRA_REASON", reason)
         }
-        startActivity(intent)
+
+        val pendingIntent = PendingIntent.getActivity(
+            this,
+            1001,
+            overlayIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val alarmNotif = NotificationCompat.Builder(this, ALARM_CHANNEL_ID)
+            .setContentTitle("🚨 STUDY BREACH DETECTED!")
+            .setContentText(reason)
+            .setSmallIcon(android.R.drawable.ic_lock_idle_alarm)
+            .setPriority(NotificationCompat.PRIORITY_MAX)
+            .setCategory(NotificationCompat.CATEGORY_ALARM)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .setFullScreenIntent(pendingIntent, true)
+            .setAutoCancel(false)
+            .setOngoing(true)
+            .build()
+
+        val mgr = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        mgr.notify(ALARM_NOTIFICATION_ID, alarmNotif)
+
+        try {
+            startActivity(overlayIntent)
+        } catch (_: Exception) {}
     }
 
     private fun playLoudAlarmSound() {
@@ -218,6 +265,7 @@ class DeskMonitorService : Service() {
             if (mediaPlayer == null) {
                 val alertUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
                     ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE)
+                    ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
 
                 mediaPlayer = MediaPlayer().apply {
                     setDataSource(applicationContext, alertUri)
@@ -262,6 +310,9 @@ class DeskMonitorService : Service() {
         isSnoozed = true
         isOverlayVisible = false
 
+        val mgr = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        mgr.cancel(ALARM_NOTIFICATION_ID)
+
         handler.postDelayed({
             isSnoozed = false
             dbRef.get().addOnSuccessListener { snapshot ->
@@ -292,6 +343,10 @@ class DeskMonitorService : Service() {
     private fun dismissAlarmAndOverlay() {
         muteAlarmSound()
         isOverlayVisible = false
+
+        val mgr = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        mgr.cancel(ALARM_NOTIFICATION_ID)
+
         sendBroadcast(Intent("com.desk.companion2.CLOSE_OVERLAY"))
     }
 
