@@ -1,709 +1,377 @@
 package com.desk.companion2.ui
 
-import android.Manifest
-import android.app.NotificationManager
-import android.app.admin.DevicePolicyManager
-import android.content.ComponentName
+import android.app.AlertDialog
+import android.app.TimePickerDialog
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
-import android.content.SharedPreferences
-import android.content.pm.PackageManager
-import android.graphics.BitmapFactory
+import android.content.IntentFilter
 import android.graphics.Color
-import android.graphics.Typeface
-import android.graphics.drawable.GradientDrawable
-import android.graphics.drawable.RippleDrawable
-import android.content.res.ColorStateList
-import android.net.ConnectivityManager
-import android.net.NetworkCapabilities
-import android.net.Uri
-import android.os.Build
 import android.os.Bundle
-import android.os.Handler
-import android.os.Looper
-import android.os.PowerManager
-import android.provider.Settings
-import android.util.Base64
+import android.text.InputType
 import android.view.Gravity
 import android.view.View
-import android.view.ViewGroup
 import android.widget.*
 import androidx.appcompat.app.AppCompatActivity
-import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
-import com.desk.companion2.DeskConfig
-import com.desk.companion2.receivers.CompanionAdminReceiver
+import com.desk.companion2.data.DeskPreferences
+import com.desk.companion2.data.RestSlot
 import com.desk.companion2.service.DeskMonitorService
-import com.google.firebase.database.*
-import java.text.SimpleDateFormat
-import java.util.*
 
 class MainActivity : AppCompatActivity() {
 
-    private lateinit var dbRef: DatabaseReference
-    private var valueListener: ValueEventListener? = null
-    private lateinit var prefs: SharedPreferences
+    private lateinit var deskPrefs: DeskPreferences
+    private lateinit var statusTextView: TextView
+    private lateinit var guardToggleButton: ToggleButton
+    private lateinit var settingsButton: Button
+    private lateinit var infoTextView: TextView
 
-    private lateinit var tvStatusBadge: TextView
-    private lateinit var tvBatteryValue: TextView
-    private lateinit var tvBatterySub: TextView
-    private lateinit var tvHeartbeatValue: TextView
-    private lateinit var tvHeartbeatSub: TextView
-    private lateinit var btnRequestSnap: Button
-    private lateinit var ivLivePhoto: ImageView
-    private lateinit var tvPhotoPlaceholder: TextView
-    private lateinit var tvPhotoTimestamp: TextView
-
-    private lateinit var bannerSnooze: LinearLayout
-
-    // Checklist Views
-    private lateinit var tvShieldTitle: TextView
-    private lateinit var shieldCard: LinearLayout
-    private lateinit var viewAllDoneCard: TextView
-    private lateinit var itemNotif: View
-    private lateinit var div0: View
-    private lateinit var itemAdmin: View
-    private lateinit var div1: View
-    private lateinit var itemOverlay: View
-    private lateinit var div2: View
-    private lateinit var itemAutostart: View
-    private lateinit var div3: View
-    private lateinit var itemBattery: View
-
-    private var lastHeartbeatMs: Long = 0L
-    private var isAlarmActiveOnServer: Boolean = false
-    private val loopHandler = Handler(Looper.getMainLooper())
+    private val overlayCloseReceiver = object : BroadcastReceiver() {
+        onReceive(context: Context?, intent: Intent?) {
+            // Handled or refreshed if needed
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        prefs = getSharedPreferences("DeskCompanionPrefs", Context.MODE_PRIVATE)
+        deskPrefs = DeskPreferences(this)
 
-        // Request Android 13+ Notification Permission on Launch
-        checkAndRequestNotificationPermission()
-
+        // Ensure background service is running
         val serviceIntent = Intent(this, DeskMonitorService::class.java)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            startForegroundService(serviceIntent)
-        } else {
-            startService(serviceIntent)
-        }
+        ContextCompat.startForegroundService(this, serviceIntent)
 
-        renderExecutiveDashboard()
-        connectDirectlyToFirebase()
-        startRealtimeUIRefresher()
+        setupUI()
+
+        // First-launch Master PIN Setup check
+        if (!deskPrefs.isPinSet()) {
+            showFirstLaunchPinSetupDialog()
+        }
     }
 
     override fun onResume() {
         super.onResume()
-        refreshSecurityChecklistVisibility()
+        updateDashboardUI()
     }
 
-    private fun checkAndRequestNotificationPermission() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
-                ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.POST_NOTIFICATIONS), 9901)
-            }
-        }
-    }
-
-    private fun renderExecutiveDashboard() {
-        val rootScroll = ScrollView(this).apply {
-            layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
-            setBackgroundColor(Color.parseColor("#0B0F19"))
-            isFillViewport = true
-            overScrollMode = View.OVER_SCROLL_NEVER
-        }
-
-        val mainContainer = LinearLayout(this).apply {
+    private fun setupUI() {
+        val layout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(20), dp(24), dp(20), dp(36))
+            gravity = Gravity.CENTER
+            setPadding(48, 48, 48, 48)
+            setBackgroundColor(Color.parseColor("#121212"))
         }
 
-        // Emergency Snooze Banner
-        bannerSnooze = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setBackgroundColor(Color.parseColor("#DC2626"))
-            background = createCardDrawable(Color.parseColor("#DC2626"), Color.parseColor("#EF4444"))
-            setPadding(dp(16), dp(12), dp(16), dp(12))
-            val p = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
-            p.setMargins(0, 0, 0, dp(16))
-            layoutParams = p
-            visibility = View.GONE
+        val title = TextView(this).apply {
+            text = "🛡️ Desk Companion 2"
+            textSize = 24f
+            setTextColor(Color.WHITE
+            gravity = Gravity.CENTER
+            setPadding(0, 0, 0, 32)
         }
+        layout.addView(title)
 
-        val tvSnoozeMsg = TextView(this).apply {
-            text = "🚨 ALARM IS RINGING!"
-            setTextColor(Color.WHITE)
+        statusTextView = TextView(this).apply {
+            text = "Checking status..."
+            textSize = 16f
+            setTextColor(Color.LTGRAY)
+            gravity = Gravity.CENTER
+            setPadding(0, 0, 0, 48)
+        }
+        layout.addView(statusTextView)
+
+        guardToggleButton = ToggleButton(this).apply {
+            textOn = "GUARD ARMED (Tap to Disarm)"
+            textOff = "GUARD DISARMED (Tap to Arm)"
             textSize = 14f
-            typeface = Typeface.DEFAULT_BOLD
-            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            setTextColor(Color.WHITE)
+            setBackgroundColor(Color.parseColor("#1B5E20"))
+            setPadding(32, 32, 32, 32)
+            setOnbuttonClickListener()
         }
+        
+        // Custom click handling for Master PIN security on toggle
+        guardToggleButton.setOnClickListener {
+            // Reverse toggle state temporarily until PIN is verified
+            val targetState = !guardToggleButton.isChecked
+            guardToggleButton.isChecked = !targetState
 
-        val btnBannerSnoozeAction = Button(this).apply {
-            text = "SNOOZE (5M)"
-            setTextColor(Color.parseColor("#991B1B"))
-            textSize = 12f
-            typeface = Typeface.DEFAULT_BOLD
-            background = GradientDrawable().apply {
-                setColor(Color.WHITE)
-                cornerRadius = dp(8).toFloat()
+            showPinVerificationDialog("Enter Master PIN to change Guard State") { verified ->
+                if (verified) {
+                    val newState = !targetState
+                    deskPrefs.setGuardArmed(newState)
+                    guardToggleButton.isChecked = newState
+                    updateDashboardUI()
+                    
+                    // Notify service of state change
+                    val intent = Intent(this, DeskMonitorService::class.java).apply {
+                        action = DeskMonitorService.ACTION_STATE_CHANGED
+                    }
+                    startService(intent)
+                }
             }
-            setPadding(dp(12), dp(6), dp(12), dp(6))
+        }
+        layout.addView(guardToggleButton)
+
+        settingsButton = Button(this).apply {
+            text = "⚙️ Secure Settings (PIN Protected)"
+            setTextColor(Color.WHITE)
+            setBackgroundColor(Color.parseColor("#37474F"))
+            setPadding(32, 24, 32, 24)
             setOnClickListener {
-                startService(Intent(this@MainActivity, DeskMonitorService::class.java).apply {
-                    action = DeskMonitorService.ACTION_SNOOZE
-                })
-                bannerSnooze.visibility = View.GONE
+                showPinVerificationDialog("Enter Master PIN to access Settings") { verified ->
+                    if (verified) {
+                        showSecureSettingsDialog()
+                    }
+                }
             }
         }
+        val params = LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply { topMargin = 48 }
+        layout.addView(settingsButton, params)
 
-        bannerSnooze.addView(tvSnoozeMsg)
-        bannerSnooze.addView(btnBannerSnoozeAction)
-        mainContainer.addView(bannerSnooze)
-
-        // 1. TOP HEADER
-        val headerRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, 0, 0, dp(18))
-        }
-
-        val titleCol = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-        }
-
-        val tvAppTitle = TextView(this).apply {
-            text = "Desk Companion"
-            setTextColor(Color.WHITE)
-            textSize = 22f
-            typeface = Typeface.create("sans-serif-black", Typeface.BOLD)
-        }
-
-        val tvDeviceIdBadge = TextView(this).apply {
-            text = "TARGET: #${DeskConfig.TARGET_DEVICE_ID} (PERMANENT GUARD)"
-            setTextColor(Color.parseColor("#38BDF8"))
+        infoTextView = TextView(this).apply {
+            text = "Local Master PIN secured • Multi-slot Rest Active • 1-5m Snooze Ready"
             textSize = 12f
-            typeface = Typeface.MONOSPACE
-            setPadding(0, dp(4), 0, 0)
-        }
-        titleCol.addView(tvAppTitle)
-        titleCol.addView(tvDeviceIdBadge)
-
-        tvStatusBadge = TextView(this).apply {
-            text = "● CONNECTING"
-            setTextColor(Color.parseColor("#F59E0B"))
-            textSize = 11f
-            typeface = Typeface.DEFAULT_BOLD
-            background = createPillDrawable(Color.parseColor("#271C0C"), Color.parseColor("#F59E0B"))
-            setPadding(dp(12), dp(6), dp(12), dp(6))
-        }
-
-        headerRow.addView(titleCol)
-        headerRow.addView(tvStatusBadge)
-        mainContainer.addView(headerRow)
-
-        // 2. TELEMETRY CARDS
-        val telemetryGrid = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            val params = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
-            params.setMargins(0, 0, 0, dp(16))
-            layoutParams = params
-        }
-
-        val batteryCard = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            background = createCardDrawable(Color.parseColor("#131B2E"), Color.parseColor("#1E293B"))
-            setPadding(dp(16), dp(14), dp(16), dp(14))
-            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
-                marginEnd = dp(8)
-            }
-        }
-        val tvBatTitle = TextView(this).apply {
-            text = "⚡ BATTERY"
-            setTextColor(Color.parseColor("#94A3B8"))
-            textSize = 11f
-            typeface = Typeface.DEFAULT_BOLD
-        }
-        tvBatteryValue = TextView(this).apply {
-            text = "--%"
-            setTextColor(Color.WHITE)
-            textSize = 22f
-            typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
-            setPadding(0, dp(4), 0, dp(2))
-        }
-        tvBatterySub = TextView(this).apply {
-            text = "Waiting..."
-            setTextColor(Color.parseColor("#64748B"))
-            textSize = 11f
-        }
-        batteryCard.addView(tvBatTitle)
-        batteryCard.addView(tvBatteryValue)
-        batteryCard.addView(tvBatterySub)
-
-        val heartbeatCard = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            background = createCardDrawable(Color.parseColor("#131B2E"), Color.parseColor("#1E293B"))
-            setPadding(dp(16), dp(14), dp(16), dp(14))
-            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
-                marginStart = dp(8)
-            }
-        }
-        val tvHbTitle = TextView(this).apply {
-            text = "⏱ HEARTBEAT"
-            setTextColor(Color.parseColor("#94A3B8"))
-            textSize = 11f
-            typeface = Typeface.DEFAULT_BOLD
-        }
-        tvHeartbeatValue = TextView(this).apply {
-            text = "--"
-            setTextColor(Color.WHITE)
-            textSize = 18f
-            typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
-            setPadding(0, dp(8), 0, dp(2))
-        }
-        tvHeartbeatSub = TextView(this).apply {
-            text = "Standby"
-            setTextColor(Color.parseColor("#64748B"))
-            textSize = 11f
-        }
-        heartbeatCard.addView(tvHbTitle)
-        heartbeatCard.addView(tvHeartbeatValue)
-        heartbeatCard.addView(tvHeartbeatSub)
-
-        telemetryGrid.addView(batteryCard)
-        telemetryGrid.addView(heartbeatCard)
-        mainContainer.addView(telemetryGrid)
-
-        // 3. LIVE SNAPSHOT BUTTON & DIRECT VIEWFINDER
-        btnRequestSnap = createModernButton("📸 Request Live Snapshot", Color.parseColor("#0284C7"), Color.WHITE).apply {
-            val params = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(48))
-            params.setMargins(0, 0, 0, dp(10))
-            layoutParams = params
-            setOnClickListener { requestSnapshot() }
-        }
-        mainContainer.addView(btnRequestSnap)
-
-        val photoWindowFrame = FrameLayout(this).apply {
-            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(220)).apply {
-                setMargins(0, 0, 0, dp(16))
-            }
-            background = createCardDrawable(Color.parseColor("#0F172A"), Color.parseColor("#334155"))
-        }
-
-        ivLivePhoto = ImageView(this).apply {
-            layoutParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
-            scaleType = ImageView.ScaleType.CENTER_CROP
-            visibility = View.GONE
-        }
-
-        tvPhotoPlaceholder = TextView(this).apply {
-            text = "📷 Live Viewfinder Ready\nTap 'Request Live Snapshot' above to fetch photo"
-            setTextColor(Color.parseColor("#64748B"))
-            textSize = 13f
+            setTextColor(Color.GRAY)
             gravity = Gravity.CENTER
-            layoutParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
+            setPadding(0, 64, 0, 0)
         }
+        layout.addView(infoTextView)
 
-        tvPhotoTimestamp = TextView(this).apply {
-            text = "● LIVE CAPTURE"
-            setTextColor(Color.WHITE)
-            textSize = 10f
-            typeface = Typeface.DEFAULT_BOLD
-            background = createPillDrawable(Color.parseColor("#B91C1C"), Color.TRANSPARENT)
-            setPadding(dp(8), dp(4), dp(8), dp(4))
-            val p = FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT).apply {
-                gravity = Gravity.BOTTOM or Gravity.START
-                setMargins(dp(12), 0, 0, dp(12))
-            }
-            layoutParams = p
-            visibility = View.GONE
+        setContentView(layout)
+        updateDashboardUI()
+    }
+
+    private fun updateDashboardUI() {
+        val isArmed = deskPrefs.isGuardArmed()
+        guardToggleButton.isChecked = isArmed
+        
+        if (!isArmed) {
+            statusTextView.text = "STATUS: PAUSED / DISARMED\n(Protected by Master PIN)"
+            statusTextView.setTextColor(Color.parseColor("#FF5252"))
+            guardToggleButton.setBackgroundColor(Color.parseColor("#B71C1C"))
+        } else if (deskPrefs.isRestTimeActive()) {
+            statusTextView.text = "STATUS: REST SCHEDULE ACTIVE\n(Temporarily Silent)"
+            statusTextView.setTextColor(Color.parseColor("#FFD54F"))
+            guardToggleButton.setBackgroundColor(Color.parseColor("#F57F17"))
+        } else {
+            statusTextView.text = "STATUS: ● DESK PROTECTED\n(Active Monitoring)"
+            statusTextView.setTextColor(Color.parseColor("#69F0AE"))
+            guardToggleButton.setBackgroundColor(Color.parseColor("#1B5E20"))
         }
+    }
 
-        photoWindowFrame.addView(ivLivePhoto)
-        photoWindowFrame.addView(tvPhotoPlaceholder)
-        photoWindowFrame.addView(tvPhotoTimestamp)
-        mainContainer.addView(photoWindowFrame)
-
-        // 4. STUDY LOGS BUTTON
-        val btnViewReports = createModernButton("📊 View Complete Study Logs", Color.parseColor("#0F766E"), Color.WHITE).apply {
-            val params = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(48))
-            params.setMargins(0, 0, 0, dp(20))
-            layoutParams = params
-            setOnClickListener {
-                startActivity(Intent(this@MainActivity, EventsActivity::class.java))
-            }
-        }
-        mainContainer.addView(btnViewReports)
-
-        // 5. SECURITY CHECKLIST WIZARD
-        tvShieldTitle = TextView(this).apply {
-            text = "🛡️ ANTI-TAMPER SECURITY CHECKLIST"
-            setTextColor(Color.parseColor("#38BDF8"))
-            textSize = 12f
-            typeface = Typeface.DEFAULT_BOLD
-            setPadding(0, dp(4), 0, dp(8))
-        }
-        mainContainer.addView(tvShieldTitle)
-
-        viewAllDoneCard = TextView(this).apply {
-            text = "🛡️ All Anti-Tamper Protections Active ✓"
-            setTextColor(Color.parseColor("#22C55E"))
-            textSize = 13f
-            typeface = Typeface.DEFAULT_BOLD
-            gravity = Gravity.CENTER
-            background = createCardDrawable(Color.parseColor("#052E16"), Color.parseColor("#15803D"))
-            setPadding(dp(16), dp(14), dp(16), dp(14))
-            val params = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
-            params.setMargins(0, 0, 0, dp(16))
-            layoutParams = params
-            visibility = View.GONE
-        }
-        mainContainer.addView(viewAllDoneCard)
-
-        shieldCard = LinearLayout(this).apply {
+    private fun showFirstLaunchPinSetupDialog() {
+        val dialogView = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            background = createCardDrawable(Color.parseColor("#131B2E"), Color.parseColor("#1E293B"))
-            setPadding(dp(16), dp(8), dp(16), dp(8))
-            val params = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
-            params.setMargins(0, 0, 0, dp(16))
-            layoutParams = params
+            setPadding(40, 40, 40, 40)
         }
 
-        itemNotif = createChecklistItem("1", "Allow Notifications", "Crucial for immediate breach & disconnect alerts") {
-            checkAndRequestNotificationPermission()
+        val msg = TextView(this).apply {
+            text = "Welcome! Set your 4-Digit Master PIN to secure this application."
+            setTextColor(Color.WHITE)
+            setPadding(0, 0, 0, 24)
         }
-        div0 = createDivider()
-        itemAdmin = createChecklistItem("2", "Device Admin", "Blocks student from uninstalling companion") { requestAdmin() }
-        div1 = createDivider()
-        itemOverlay = createChecklistItem("3", "Display Over Apps", "Allows instant full-screen alarm trigger") { requestOverlayPermission() }
-        div2 = createDivider()
-        itemAutostart = createChecklistItem("4", "Allow Autostart", "Enables auto-restart for MI / Oppo / Vivo") { openOemAutostartSettings() }
-        div3 = createDivider()
-        itemBattery = createChecklistItem("5", "No Battery Restrictions", "Stops system from putting socket to sleep") { requestIgnoreBatteryOptimization() }
+        dialogView.addView(msg)
 
-        shieldCard.addView(itemNotif)
-        shieldCard.addView(div0)
-        shieldCard.addView(itemAdmin)
-        shieldCard.addView(div1)
-        shieldCard.addView(itemOverlay)
-        shieldCard.addView(div2)
-        shieldCard.addView(itemAutostart)
-        shieldCard.addView(div3)
-        shieldCard.addView(itemBattery)
-
-        mainContainer.addView(shieldCard)
-
-        rootScroll.addView(mainContainer)
-        setContentView(rootScroll)
-    }
-
-    private fun isCompanionOnline(): Boolean {
-        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-        val net = cm.activeNetwork ?: return false
-        val caps = cm.getNetworkCapabilities(net) ?: return false
-        return caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-    }
-
-    private fun startRealtimeUIRefresher() {
-        loopHandler.post(object : Runnable {
-            override fun run() {
-                updateLiveStatusBadge()
-                loopHandler.postDelayed(this, 1000)
-            }
-        })
-    }
-
-    private fun updateLiveStatusBadge() {
-        if (DeskMonitorService.isCurrentlyRinging || isAlarmActiveOnServer) {
-            bannerSnooze.visibility = View.VISIBLE
-        } else {
-            bannerSnooze.visibility = View.GONE
+        val input1 = EditText(this).apply {
+            hint = "Enter 4-Digit PIN"
+            inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_TEXT_VARIATION_PASSWORD
         }
+        dialogView.addView(input1)
 
-        val now = System.currentTimeMillis()
-        val hasNet = isCompanionOnline()
-        val diffSec = if (lastHeartbeatMs > 0L) (now - lastHeartbeatMs) / 1000 else 999L
-
-        if (!hasNet || (lastHeartbeatMs > 0L && diffSec > 15L)) {
-            tvStatusBadge.text = "○ DESK DISCONNECTED"
-            tvStatusBadge.setTextColor(Color.parseColor("#EF4444"))
-            tvStatusBadge.background = createPillDrawable(Color.parseColor("#3B0D0D"), Color.parseColor("#EF4444"))
-
-            tvHeartbeatValue.text = if (!hasNet) "No Internet" else "${diffSec}s ago"
-            tvHeartbeatSub.text = if (!hasNet) "Wi-Fi / Mobile Data Off" else "Heartbeat Lost"
-            tvHeartbeatSub.setTextColor(Color.parseColor("#EF4444"))
-        } else if (isAlarmActiveOnServer || DeskMonitorService.isCurrentlyRinging) {
-            tvStatusBadge.text = "● BREACH ALARM ACTIVE"
-            tvStatusBadge.setTextColor(Color.parseColor("#EF4444"))
-            tvStatusBadge.background = createPillDrawable(Color.parseColor("#3B0D0D"), Color.parseColor("#EF4444"))
-        } else if (lastHeartbeatMs > 0L) {
-            tvStatusBadge.text = "● DESK PROTECTED"
-            tvStatusBadge.setTextColor(Color.parseColor("#22C55E"))
-            tvStatusBadge.background = createPillDrawable(Color.parseColor("#052E16"), Color.parseColor("#22C55E"))
-
-            tvHeartbeatValue.text = if (diffSec < 60) "${diffSec}s ago" else "${diffSec / 60}m ago"
-            val timeFormatted = SimpleDateFormat("hh:mm:ss a", Locale.getDefault()).format(Date(lastHeartbeatMs))
-            tvHeartbeatSub.text = timeFormatted
-            tvHeartbeatSub.setTextColor(Color.parseColor("#64748B"))
+        val input2 = EditText(this).apply {
+            hint = "Confirm 4-Digit PIN"
+            inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_TEXT_VARIATION_PASSWORD
         }
-    }
+        dialogView.addView(input2)
 
-    private fun refreshSecurityChecklistVisibility() {
-        // 1. Notification Permission
-        val notifGranted = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
-        } else {
-            val mgr = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-            mgr.areNotificationsEnabled()
-        }
+        AlertDialog.Builder(this)
+            .setTitle("🔒 Set Master PIN")
+            .setView(dialogView)
+            .setCancelable(false)
+            .setPositiveButton("Save PIN") { _, _ ->
+                val p1 = input1.text.toString().trim()
+                val p2 = input2.text.toString().trim()
 
-        // 2. Admin
-        val dpm = getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
-        val adminComp = ComponentName(this, CompanionAdminReceiver::class.java)
-        val isAdminActive = dpm.isAdminActive(adminComp)
-
-        // 3. Overlay
-        val hasOverlay = Build.VERSION.SDK_INT < Build.VERSION_CODES.M || Settings.canDrawOverlays(this)
-
-        // 4. Battery
-        val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
-        val isNoBatteryRestrictions = Build.VERSION.SDK_INT < Build.VERSION_CODES.M || pm.isIgnoringBatteryOptimizations(packageName)
-
-        // 5. Autostart
-        val isAutostartDone = prefs.getBoolean("autostart_configured", false)
-
-        // Toggle Views
-        itemNotif.visibility = if (notifGranted) View.GONE else View.VISIBLE
-        div0.visibility = itemNotif.visibility
-
-        itemAdmin.visibility = if (isAdminActive) View.GONE else View.VISIBLE
-        div1.visibility = itemAdmin.visibility
-
-        itemOverlay.visibility = if (hasOverlay) View.GONE else View.VISIBLE
-        div2.visibility = itemOverlay.visibility
-
-        itemAutostart.visibility = if (isAutostartDone) View.GONE else View.VISIBLE
-        div3.visibility = itemAutostart.visibility
-
-        itemBattery.visibility = if (isNoBatteryRestrictions) View.GONE else View.VISIBLE
-
-        val allGranted = notifGranted && isAdminActive && hasOverlay && isAutostartDone && isNoBatteryRestrictions
-        if (allGranted) {
-            shieldCard.visibility = View.GONE
-            tvShieldTitle.visibility = View.GONE
-            viewAllDoneCard.visibility = View.VISIBLE
-        } else {
-            shieldCard.visibility = View.VISIBLE
-            tvShieldTitle.visibility = View.VISIBLE
-            viewAllDoneCard.visibility = View.GONE
-        }
-    }
-
-    private fun connectDirectlyToFirebase() {
-        val db = FirebaseDatabase.getInstance()
-        dbRef = db.getReference(DeskConfig.FIREBASE_ROOT_NODE).child(DeskConfig.TARGET_DEVICE_ID)
-
-        valueListener = object : ValueEventListener {
-            override fun onDataChange(snapshot: DataSnapshot) {
-                if (!snapshot.exists()) return
-
-                isAlarmActiveOnServer = snapshot.child("alarm_active").getValue(Boolean::class.java) ?: false
-
-                val bat = snapshot.child("battery_level").getValue(Int::class.java) ?: -1
-                val charging = snapshot.child("is_charging").getValue(Boolean::class.java) ?: false
-                if (bat >= 0) {
-                    tvBatteryValue.text = "$bat%"
-                    tvBatterySub.text = if (charging) "⚡ Charger Plugged" else "Discharging"
-                    tvBatterySub.setTextColor(if (charging) Color.parseColor("#38BDF8") else Color.parseColor("#94A3B8"))
-                }
-
-                snapshot.child("last_heartbeat").getValue(Long::class.java)?.let {
-                    lastHeartbeatMs = it
-                }
-
-                val base64Img = snapshot.child("latest_snapshot_base64").getValue(String::class.java)
-                if (!base64Img.isNullOrEmpty()) {
-                    try {
-                        val decodedBytes = Base64.decode(base64Img, Base64.DEFAULT)
-                        val bmp = BitmapFactory.decodeByteArray(decodedBytes, 0, decodedBytes.size)
-                        ivLivePhoto.setImageBitmap(bmp)
-                        ivLivePhoto.visibility = View.VISIBLE
-                        tvPhotoPlaceholder.visibility = View.GONE
-
-                        val snapTime = snapshot.child("latest_snap_time").getValue(Long::class.java) ?: System.currentTimeMillis()
-                        val snapTimeStr = SimpleDateFormat("hh:mm:ss a", Locale.getDefault()).format(Date(snapTime))
-                        tvPhotoTimestamp.text = "● LIVE SNAPSHOT ($snapTimeStr)"
-                        tvPhotoTimestamp.visibility = View.VISIBLE
-                        btnRequestSnap.text = "🔄 Refresh Live Snapshot"
-                    } catch (e: Exception) {}
+                if (p1.length == 4 && p1 == p2) {
+                    deskPrefs.setMasterPin(p1)
+                    Toast.makeText(this, "Master PIN Saved Successfully!", Toast.LENGTH_SHORT).show()
+                    updateDashboardUI()
+                } else {
+                    Toast.makeText(this, "PINs must match and be 4 digits!", Toast.LENGTH_LONG).show()
+                    showFirstLaunchPinSetupDialog()
                 }
             }
+            .show()
+    }
 
-            override fun onCancelled(error: DatabaseError) {}
+    private fun showPinVerificationDialog(titleText: String, onResult: (Boolean) -> Unit) {
+        val input = EditText(this).apply {
+            hint = "Enter Master PIN"
+            inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_TEXT_VARIATION_PASSWORD
+            setPadding(40, 40, 40, 40)
         }
-        dbRef.addValueEventListener(valueListener!!)
-    }
 
-    private fun requestSnapshot() {
-        btnRequestSnap.text = "⏳ Requesting Frame..."
-        dbRef.child("commands").child("request_snap").setValue(true)
-        Toast.makeText(this, "Command sent to camera stand...", Toast.LENGTH_SHORT).show()
-    }
-
-    private fun createCardDrawable(bgColor: Int, strokeColor: Int): GradientDrawable {
-        return GradientDrawable().apply {
-            setColor(bgColor)
-            cornerRadius = dp(14).toFloat()
-            setStroke(dp(1), strokeColor)
-        }
-    }
-
-    private fun createPillDrawable(bgColor: Int, strokeColor: Int): GradientDrawable {
-        return GradientDrawable().apply {
-            setColor(bgColor)
-            cornerRadius = dp(20).toFloat()
-            if (strokeColor != Color.TRANSPARENT) setStroke(dp(1), strokeColor)
-        }
-    }
-
-    private fun createModernButton(text: String, bgTint: Int, txtColor: Int): Button {
-        return Button(this).apply {
-            this.text = text
-            setTextColor(txtColor)
-            textSize = 14f
-            typeface = Typeface.DEFAULT_BOLD
-            isAllCaps = false
-            val shape = GradientDrawable().apply {
-                setColor(bgTint)
-                cornerRadius = dp(12).toFloat()
+        AlertDialog.Builder(this)
+            .setTitle(titleText)
+            .setView(input)
+            .setPositiveButton("Verify") { _, _ ->
+                val entered = input.text.toString().trim()
+                if (deskPrefs.verifyPin(entered)) {
+                    onResult(true)
+                } else {
+                    Toast.makeText(this, "Incorrect Master PIN!", Toast.LENGTH_SHORT).show()
+                    onResult(false)
+                }
             }
-            background = RippleDrawable(ColorStateList.valueOf(Color.parseColor("#33FFFFFF")), shape, null)
-        }
+            .setNegativeButton("Cancel") { _, _ -> onResult(false) }
+            .setCancelable(false)
+            .show()
     }
 
-    private fun createChecklistItem(number: String, title: String, subtitle: String, onClick: () -> Unit): View {
-        val row = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, dp(10), 0, dp(10))
-            isClickable = true
-            isFocusable = true
-            val outValue = android.util.TypedValue()
-            context.theme.resolveAttribute(android.R.attr.selectableItemBackground, outValue, true)
-            setBackgroundResource(outValue.resourceId)
-            setOnClickListener { onClick() }
-        }
-
-        val badge = TextView(this).apply {
-            text = number
-            setTextColor(Color.WHITE)
-            textSize = 11f
-            typeface = Typeface.DEFAULT_BOLD
-            gravity = Gravity.CENTER
-            background = createPillDrawable(Color.parseColor("#1E293B"), Color.parseColor("#38BDF8"))
-            layoutParams = LinearLayout.LayoutParams(dp(24), dp(24)).apply { marginEnd = dp(12) }
-        }
-
-        val textCol = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-        }
-
-        val tvMain = TextView(this).apply {
-            text = title
-            setTextColor(Color.WHITE)
-            textSize = 13f
-            typeface = Typeface.DEFAULT_BOLD
-        }
-        val tvSub = TextView(this).apply {
-            text = subtitle
-            setTextColor(Color.parseColor("#94A3B8"))
-            textSize = 11f
-            setPadding(0, dp(2), 0, 0)
-        }
-        textCol.addView(tvMain)
-        textCol.addView(tvSub)
-
-        val tvArrow = TextView(this).apply {
-            text = "›"
-            setTextColor(Color.parseColor("#64748B"))
-            textSize = 20f
-            typeface = Typeface.DEFAULT_BOLD
-            setPadding(dp(8), 0, dp(4), 0)
-        }
-
-        row.addView(badge)
-        row.addView(textCol)
-        row.addView(tvArrow)
-        return row
-    }
-
-    private fun createDivider(): View {
-        return View(this).apply {
-            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(1))
-            setBackgroundColor(Color.parseColor("#1E293B"))
-        }
-    }
-
-    private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
-
-    private fun requestAdmin() {
-        val comp = ComponentName(this, CompanionAdminReceiver::class.java)
-        val intent = Intent(DevicePolicyManager.ACTION_ADD_DEVICE_ADMIN).apply {
-            putExtra(DevicePolicyManager.EXTRA_DEVICE_ADMIN, comp)
-            putExtra(DevicePolicyManager.EXTRA_ADD_EXPLANATION, "Locks app against removal by student.")
-        }
-        startActivity(intent)
-    }
-
-    private fun requestOverlayPermission() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.canDrawOverlays(this)) {
-            startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
-        } else {
-            Toast.makeText(this, "Display Overlay already authorized ✓", Toast.LENGTH_SHORT).show()
-        }
-    }
-
-    private fun requestIgnoreBatteryOptimization() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
-            if (!pm.isIgnoringBatteryOptimizations(packageName)) {
-                startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName")))
-            } else {
-                Toast.makeText(this, "Battery is set to 'No Restrictions' ✓", Toast.LENGTH_SHORT).show()
-            }
-        }
-    }
-
-    private fun openOemAutostartSettings() {
-        prefs.edit().putBoolean("autostart_configured", true).apply()
-        refreshSecurityChecklistVisibility()
-
-        val intents = listOf(
-            Intent().setComponent(ComponentName("com.miui.securitycenter", "com.miui.permcenter.autostart.AutoStartManagementActivity")),
-            Intent().setComponent(ComponentName("com.coloros.safecenter", "com.coloros.safecenter.permission.startup.StartupAppListActivity")),
-            Intent().setComponent(ComponentName("com.coloros.safecenter", "com.coloros.safecenter.startupapp.StartupAppListActivity")),
-            Intent().setComponent(ComponentName("com.vivo.permissionmanager", "com.vivo.permissionmanager.activity.BgStartUpManagerActivity")),
-            Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName"))
+    private fun showSecureSettingsDialog() {
+        val options = arrayOf(
+            "🔑 Change Master PIN",
+            "⏱️ Set Breach Snooze Timer (1-5 Min)",
+            "🌙 Configure 4 Rest Time Slots"
         )
 
-        for (intent in intents) {
-            try {
-                startActivity(intent)
-                return
-            } catch (_: Exception) {}
+        AlertDialog.Builder(this)
+            .setTitle("⚙️ Secure Settings")
+            .setItems(options) { _, which ->
+                when (which) {
+                    0 -> showChangePinDialog()
+                    1 -> showSnoozeConfigDialog()
+                    2 -> showRestSlotsDialog()
+                }
+            }
+            .setNegativeButton("Close", null)
+            .show()
+    }
+
+    private fun showChangePinDialog() {
+        val layout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(40, 40, 40, 40)
         }
+        val currentInput = EditText(this).apply {
+            hint = "Current PIN"
+            inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_TEXT_VARIATION_PASSWORD
+        }
+        val newInput = EditText(this).apply {
+            hint = "New 4-Digit PIN"
+            inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_TEXT_VARIATION_PASSWORD
+        }
+        val confirmInput = EditText(this).apply {
+            hint = "Confirm New 4-Digit PIN"
+            inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_TEXT_VARIATION_PASSWORD
+        }
+        layout.addView(currentInput)
+        layout.addView(newInput)
+        layout.addView(confirmInput)
+
+        AlertDialog.Builder(this)
+            .setTitle("🔑 Change Master PIN")
+            .setView(layout)
+            .setPositiveButton("Update") { _, _ ->
+                val curr = currentInput.text.toString().trim()
+                val n1 = newInput.text.toString().trim()
+                val n2 = confirmInput.text.toString().trim()
+
+                if (deskPrefs.verifyPin(curr)) {
+                    if (n1.length == 4 && n1 == n2) {
+                        deskPrefs.setMasterPin(n1)
+                        Toast.makeText(this, "PIN Updated Successfully!", Toast.LENGTH_SHORT).show()
+                    } else {
+                        Toast.makeText(this, "New PIN must be 4 digits and match!", Toast.LENGTH_LONG).show()
+                    }
+                } else {
+                    Toast.makeText(this, "Current PIN is incorrect!", Toast.LENGTH_SHORT).show()
+                }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
     }
 
-    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
-        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        refreshSecurityChecklistVisibility()
+    private fun showSnoozeConfigDialog() {
+        val currentMins = deskPrefs.getSnoozeMinutes()
+        val choices = arrayOf("1 Minute", "2 Minutes", "3 Minutes", "4 Minutes", "5 Minutes")
+        val checkedIndex = (currentMins - 1).coerceIn(0, 4)
+
+        AlertDialog.Builder(this)
+            .setTitle("⏱️ Select Breach Snooze Duration")
+            .setSingleChoiceItems(choices, checkedIndex) { dialog, which ->
+                val selectedMins = which + 1
+                deskPrefs.setSnoozeMinutes(selectedMins)
+                Toast.makeText(this, "Snooze set to $selectedMins minutes", Toast.LENGTH_SHORT).show()
+                dialog.dismiss()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
     }
 
-    override fun onDestroy() {
-        super.onDestroy()
-        valueListener?.let { dbRef.removeEventListener(it) }
+    private fun showRestSlotsDialog() {
+        val slots = deskPrefs.getRestSlots()
+        val slotTitles = slots.map { "${it.name} (${if (it.enabled) "ON" else "OFF"}) - ${String.format("%02d:%02d", it.startHour, it.startMinute)} to ${String.format("%02d:%02d", it.endHour, it.endMinute)}" }.toTypedArray()
+
+        AlertDialog.Builder(this)
+            .setTitle("🌙 Rest Time Slots (Tap to Edit)")
+            .setItems(slotTitles) { _, which ->
+                showEditSingleSlotDialog(slots[which])
+            }
+            .setNegativeButton("Close", null)
+            .show()
+    }
+
+    private fun showEditSingleSlotDialog(slot: RestSlot) {
+        val layout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(40, 40, 40, 40)
+        }
+
+        val enableCheck = CheckBox(this).apply {
+            text = "Enable ${slot.name}"
+            isChecked = slot.enabled
+        }
+        layout.addView(enableCheck)
+
+        val timeBtn = Button(this).apply {
+            text = "Set Start & End Time"
+            var tempSH = slot.startHour
+            var tempSM = slot.startMinute
+            var tempEH = slot.endHour
+            var tempEM = slot.endMinute
+
+            setOnClickListener {
+                TimePickerDialog(this@MainActivity, { _, sh, sm ->
+                    tempSH = sh
+                    tempSM = sm
+                    TimePickerDialog(this@MainActivity, { _, eh, em ->
+                        tempEH = eh
+                        tempEM = em
+                        slot.startHour = tempSH
+                        slot.startMinute = tempSM
+                        slot.endHour = tempEH
+                        slot.endMinute = tempEM
+                        text = "Time: ${String.format("%02d:%02d", tempSH, tempSM)} - ${String.format("%02d:%02d", tempEH, tempEM)}"
+                    }, tempEH, tempEM, true).show()
+                }, tempSH, tempSM, true).show()
+            }
+        }
+        layout.addView(timeBtn)
+
+        AlertDialog.Builder(this)
+            .setTitle("Edit Slot: ${slot.name}")
+            .setView(layout)
+            .setPositiveButton("Save") { _, _ ->
+                slot.enabled = enableCheck.isChecked
+                deskPrefs.saveRestSlot(slot)
+                Toast.makeText(this, "Rest Slot Updated!", Toast.LENGTH_SHORT).show()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
     }
 }
