@@ -7,10 +7,10 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.graphics.Color
+import android.os.Build
 import android.os.Bundle
 import android.text.InputType
 import android.view.Gravity
-import android.view.View
 import android.widget.*
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
@@ -27,8 +27,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var infoTextView: TextView
 
     private val overlayCloseReceiver = object : BroadcastReceiver() {
-        onReceive(context: Context?, intent: Intent?) {
-            // Handled or refreshed if needed
+        override fun onReceive(context: Context?, intent: Intent?) {
+            updateDashboardUI()
         }
     }
 
@@ -45,6 +45,13 @@ class MainActivity : AppCompatActivity() {
         // First-launch Master PIN Setup check
         if (!deskPrefs.isPinSet()) {
             showFirstLaunchPinSetupDialog()
+        }
+
+        val filter = IntentFilter("com.desk.companion2.CLOSE_OVERLAY")
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(overlayCloseReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            registerReceiver(overlayCloseReceiver, filter)
         }
     }
 
@@ -64,7 +71,7 @@ class MainActivity : AppCompatActivity() {
         val title = TextView(this).apply {
             text = "🛡️ Desk Companion 2"
             textSize = 24f
-            setTextColor(Color.WHITE
+            setTextColor(Color.WHITE)
             gravity = Gravity.CENTER
             setPadding(0, 0, 0, 32)
         }
@@ -86,23 +93,25 @@ class MainActivity : AppCompatActivity() {
             setTextColor(Color.WHITE)
             setBackgroundColor(Color.parseColor("#1B5E20"))
             setPadding(32, 32, 32, 32)
-            setOnbuttonClickListener()
         }
-        
-        // Custom click handling for Master PIN security on toggle
+
         guardToggleButton.setOnClickListener {
-            // Reverse toggle state temporarily until PIN is verified
-            val targetState = !guardToggleButton.isChecked
+            val targetState = guardToggleButton.isChecked
+            // Revert visually until verified by Master PIN
             guardToggleButton.isChecked = !targetState
 
-            showPinVerificationDialog("Enter Master PIN to change Guard State") { verified ->
+            val prompt = if (targetState) {
+                "Enter Master PIN to Arm Guard"
+            } else {
+                "Enter Master PIN to Disarm Guard"
+            }
+
+            showPinVerificationDialog(prompt) { verified ->
                 if (verified) {
-                    val newState = !targetState
-                    deskPrefs.setGuardArmed(newState)
-                    guardToggleButton.isChecked = newState
+                    deskPrefs.setGuardArmed(targetState)
+                    guardToggleButton.isChecked = targetState
                     updateDashboardUI()
-                    
-                    // Notify service of state change
+
                     val intent = Intent(this, DeskMonitorService::class.java).apply {
                         action = DeskMonitorService.ACTION_STATE_CHANGED
                     }
@@ -147,7 +156,7 @@ class MainActivity : AppCompatActivity() {
     private fun updateDashboardUI() {
         val isArmed = deskPrefs.isGuardArmed()
         guardToggleButton.isChecked = isArmed
-        
+
         if (!isArmed) {
             statusTextView.text = "STATUS: PAUSED / DISARMED\n(Protected by Master PIN)"
             statusTextView.setTextColor(Color.parseColor("#FF5252"))
@@ -315,7 +324,12 @@ class MainActivity : AppCompatActivity() {
 
     private fun showRestSlotsDialog() {
         val slots = deskPrefs.getRestSlots()
-        val slotTitles = slots.map { "${it.name} (${if (it.enabled) "ON" else "OFF"}) - ${String.format("%02d:%02d", it.startHour, it.startMinute)} to ${String.format("%02d:%02d", it.endHour, it.endMinute)}" }.toTypedArray()
+        val slotTitles = slots.map {
+            val status = if (it.enabled) "ON" else "OFF"
+            val startTime = String.format("%02d:%02d", it.startHour, it.startMinute)
+            val endTime = String.format("%02d:%02d", it.endHour, it.endMinute)
+            "${it.name} ($status) - $startTime to $endTime"
+        }.toTypedArray()
 
         AlertDialog.Builder(this)
             .setTitle("🌙 Rest Time Slots (Tap to Edit)")
@@ -339,11 +353,12 @@ class MainActivity : AppCompatActivity() {
         layout.addView(enableCheck)
 
         val timeBtn = Button(this).apply {
-            text = "Set Start & End Time"
             var tempSH = slot.startHour
             var tempSM = slot.startMinute
             var tempEH = slot.endHour
             var tempEM = slot.endMinute
+
+            text = "Time: ${String.format("%02d:%02d", tempSH, tempSM)} - ${String.format("%02d:%02d", tempEH, tempEM)}"
 
             setOnClickListener {
                 TimePickerDialog(this@MainActivity, { _, sh, sm ->
@@ -373,5 +388,12 @@ class MainActivity : AppCompatActivity() {
             }
             .setNegativeButton("Cancel", null)
             .show()
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        try {
+            unregisterReceiver(overlayCloseReceiver)
+        } catch (_: Exception) {}
     }
 }
