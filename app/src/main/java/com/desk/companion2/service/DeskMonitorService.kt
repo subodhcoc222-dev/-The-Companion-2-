@@ -10,17 +10,19 @@ import android.media.RingtoneManager
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.os.*
+import android.speech.tts.TextToSpeech
 import androidx.core.app.NotificationCompat
 import com.desk.companion2.DeskConfig
+import com.desk.companion2.data.DeskPreferences
 import com.desk.companion2.ui.AlarmOverlayActivity
 import com.google.firebase.database.*
-import java.util.Calendar
+import java.util.Locale
 
-class DeskMonitorService : Service() {
+class DeskMonitorService : Service(), TextToSpeech.OnInitListener {
 
-    private val CHANNEL_ID = "DeskCompanion2ServiceChannel_v3"
-    private val ALARM_CHANNEL_ID = "DeskCompanion2AlarmChannel_v3"
-    private val WARNING_CHANNEL_ID = "DeskCompanion2WarningChannel_v3"
+    private val CHANNEL_ID = "DeskCompanion2ServiceChannel_v5"
+    private val ALARM_CHANNEL_ID = "DeskCompanion2AlarmChannel_v5"
+    private val WARNING_CHANNEL_ID = "DeskCompanion2WarningChannel_v5"
     private val NOTIFICATION_ID = 8001
     private val ALARM_NOTIFICATION_ID = 8099
     private val DISCONNECT_NOTIF_ID = 8098
@@ -30,20 +32,24 @@ class DeskMonitorService : Service() {
     private var mediaPlayer: MediaPlayer? = null
     private var wakeLock: PowerManager.WakeLock? = null
     private lateinit var audioManager: AudioManager
+    private lateinit var deskPrefs: DeskPreferences
     private val handler = Handler(Looper.getMainLooper())
+
+    private var tts: TextToSpeech? = null
+    private var isTtsReady = false
 
     private var isAlarmActiveOnDesk = false
     private var isSnoozed = false
     private var lastHeartbeatTimestamp: Long = 0L
 
-    // Disconnect Timing & Escalation
+    // Disconnection & Voice Timeline Variables
     private var disconnectStartTime: Long = 0L
-    private var lastReportedMinute: Int = -1
-
-    private val SNOOZE_PERIOD_MS = 5 * 60 * 1000L
+    private var hasSpokenDisconnect = false
+    private var isCriticalDisconnectAlarmFired = false
 
     companion object {
         const val ACTION_SNOOZE = "ACTION_SNOOZE"
+        const val ACTION_STATE_CHANGED = "ACTION_STATE_CHANGED"
         var isOverlayVisible = false
         var isCurrentlyRinging = false
         var isDeskConnected = false
@@ -51,14 +57,48 @@ class DeskMonitorService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        deskPrefs = DeskPreferences(this)
         audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+
+        initTtsEngine()
         createHighPriorityChannels()
         acquireServiceWakeLock()
 
-        startForeground(NOTIFICATION_ID, buildPermanentNotification("Monitoring Desk Sentry..."))
+        startForeground(NOTIFICATION_ID, buildPermanentNotification("Initializing Desk Guard..."))
         connectDirectlyToFirebase()
-        startFastWatchdog()
+        startUnifiedWatchdog()
         startVolumeLockLoop()
+    }
+
+    private fun initTtsEngine() {
+        tts = TextToSpeech(applicationContext, this)
+    }
+
+    override fun onInit(status: Int) {
+        if (status == TextToSpeech.SUCCESS) {
+            tts?.language = Locale.US
+            val attrs = AudioAttributes.Builder()
+                .setUsage(AudioAttributes.USAGE_ALARM)
+                .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                .build()
+            tts?.setAudioAttributes(attrs)
+            isTtsReady = true
+        }
+    }
+
+    private fun speakUrgentAlert(text: String) {
+        if (!isTtsReady || !deskPrefs.isGuardArmed() || deskPrefs.isRestTimeActive()) return
+
+        try {
+            val maxVol = audioManager.getStreamMaxVolume(AudioManager.STREAM_ALARM)
+            audioManager.setStreamVolume(AudioManager.STREAM_ALARM, maxVol, 0)
+        } catch (_: Exception) {}
+
+        val params = Bundle().apply {
+            putInt(TextToSpeech.Engine.KEY_PARAM_STREAM, AudioManager.STREAM_ALARM)
+            putFloat(TextToSpeech.Engine.KEY_PARAM_VOLUME, 1.0f)
+        }
+        tts?.speak(text, TextToSpeech.QUEUE_FLUSH, params, "TTS_ALERT_${System.currentTimeMillis()}")
     }
 
     private fun createHighPriorityChannels() {
@@ -71,7 +111,6 @@ class DeskMonitorService : Service() {
                 .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
                 .build()
 
-            // 1. Silent Ongoing Service
             val serviceChan = NotificationChannel(
                 CHANNEL_ID,
                 "Desk Monitor Permanent Service",
@@ -79,7 +118,6 @@ class DeskMonitorService : Service() {
             )
             mgr.createNotificationChannel(serviceChan)
 
-            // 2. Loud Emergency Breach Channel
             val alarmChan = NotificationChannel(
                 ALARM_CHANNEL_ID,
                 "Emergency Desk Breach Alarm",
@@ -93,7 +131,6 @@ class DeskMonitorService : Service() {
             }
             mgr.createNotificationChannel(alarmChan)
 
-            // 3. High-Priority Warning & Disconnect Alerts with Sound + Vibration
             val warningChan = NotificationChannel(
                 WARNING_CHANNEL_ID,
                 "Desk Disconnection Alerts",
@@ -119,7 +156,7 @@ class DeskMonitorService : Service() {
 
     private fun buildPermanentNotification(text: String): Notification {
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("Desk Companion 2 (Active Guard)")
+            .setContentTitle("Desk Companion 2")
             .setContentText(text)
             .setSmallIcon(android.R.drawable.ic_lock_idle_alarm)
             .setOngoing(true)
@@ -127,10 +164,9 @@ class DeskMonitorService : Service() {
             .build()
     }
 
-    private fun isNightWindow(): Boolean {
-        val cal = Calendar.getInstance()
-        val hour = cal.get(Calendar.HOUR_OF_DAY)
-        return hour >= 22 || hour < 5
+    private fun updateServiceNotification(text: String) {
+        val mgr = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        mgr.notify(NOTIFICATION_ID, buildPermanentNotification(text))
     }
 
     private fun isCompanionOnline(): Boolean {
@@ -154,12 +190,17 @@ class DeskMonitorService : Service() {
                 val deskAlarm = snapshot.child("alarm_active").getValue(Boolean::class.java) ?: false
                 isAlarmActiveOnDesk = deskAlarm
 
+                if (!deskPrefs.isGuardArmed() || deskPrefs.isRestTimeActive()) {
+                    if (isCurrentlyRinging || isOverlayVisible) dismissAlarmAndOverlay()
+                    return
+                }
+
                 if (isAlarmActiveOnDesk) {
                     if (!isCurrentlyRinging && !isSnoozed) {
                         triggerAlarm("⚠️ STUDY BREACH! Student Left Desk.")
                     }
                 } else {
-                    if (isCurrentlyRinging || isOverlayVisible) {
+                    if (isCurrentlyRinging && !isCriticalDisconnectAlarmFired) {
                         dismissAlarmAndOverlay()
                     }
                     isSnoozed = false
@@ -171,59 +212,99 @@ class DeskMonitorService : Service() {
         dbRef.addValueEventListener(valueListener!!)
     }
 
-    private fun startFastWatchdog() {
+    private fun startUnifiedWatchdog() {
         handler.post(object : Runnable {
             override fun run() {
-                checkConnectionHealth()
-                handler.postDelayed(this, 2000) // Har 2 second me check
+                evaluateSystemState()
+                handler.postDelayed(this, 1000)
             }
         })
     }
 
-    private fun checkConnectionHealth() {
+    private fun evaluateSystemState() {
+        // State 1: Guard is Disarmed via Master PIN
+        if (!deskPrefs.isGuardArmed()) {
+            updateServiceNotification("🛡️ Desk Guard: PAUSED (Disabled by Master PIN)")
+            isDeskConnected = false
+            if (isCurrentlyRinging || isOverlayVisible) dismissAlarmAndOverlay()
+            cancelDisconnectNotification()
+            disconnectStartTime = 0L
+            hasSpokenDisconnect = false
+            return
+        }
+
+        // State 2: Active Rest Schedule
+        if (deskPrefs.isRestTimeActive()) {
+            updateServiceNotification("🌙 Desk Guard: REST SCHEDULE ACTIVE (Silent)")
+            isDeskConnected = true
+            if (isCurrentlyRinging || isOverlayVisible) dismissAlarmAndOverlay()
+            cancelDisconnectNotification()
+            disconnectStartTime = 0L
+            hasSpokenDisconnect = false
+            return
+        }
+
+        // State 3: Guard is Armed & Actively Monitoring
+        updateServiceNotification("🛡️ Desk Guard: ARMED & ACTIVE (Monitoring)")
+
         val now = System.currentTimeMillis()
         val hasInternet = isCompanionOnline()
         val heartbeatAgeSec = if (lastHeartbeatTimestamp > 0L) (now - lastHeartbeatTimestamp) / 1000 else 999L
-
         val isDisconnected = !hasInternet || (lastHeartbeatTimestamp > 0L && heartbeatAgeSec > 15L)
 
         if (isDisconnected) {
             isDeskConnected = false
 
             if (disconnectStartTime == 0L) {
-                // 1. Instant Disconnect Alert (0 Second)
                 disconnectStartTime = now
-                lastReportedMinute = 0
-                val reason = if (!hasInternet) "Wi-Fi / Mobile Data Disconnected on Companion Phone!" else "Desk Camera Heartbeat Lost (>15s)!"
-                postEscalatingNotification("⚠️ DESK DISCONNECTED (Just Now)", reason)
+                hasSpokenDisconnect = false
+                isCriticalDisconnectAlarmFired = false
             } else {
-                // 2. Periodic Escalating Warnings: 2 min, 5 min, 6 min, 10 min...
-                val elapsedMins = ((now - disconnectStartTime) / (60 * 1000)).toInt()
-                if (elapsedMins > 0 && elapsedMins != lastReportedMinute) {
-                    if (elapsedMins == 2 || elapsedMins == 5 || elapsedMins == 6 || elapsedMins % 5 == 0) {
-                        lastReportedMinute = elapsedMins
-                        val reason = "Desk has been disconnected for $elapsedMins minute(s)! Check camera phone & internet."
-                        postEscalatingNotification("⚠️ DESK STILL DISCONNECTED ($elapsedMins Mins)", reason)
+                val elapsedSec = (now - disconnectStartTime) / 1000
+
+                // Phase 1: 15 seconds buffer -> Trigger Voice Alert and Notification
+                if (elapsedSec >= 15 && !hasSpokenDisconnect) {
+                    hasSpokenDisconnect = true
+                    speakUrgentAlert("Warning! Internet lost, please turn on hotspot.")
+                    postDisconnectNotification("⚠️ INTERNET LOST! Turn ON Hotspot Now")
+                }
+
+                // Phase 2: 2 minutes (120 seconds) passed -> Full Siren & Red Screen Overlay
+                if (elapsedSec >= 120 && !isCriticalDisconnectAlarmFired) {
+                    isCriticalDisconnectAlarmFired = true
+                    if (!isCurrentlyRinging && !isSnoozed) {
+                        triggerAlarm("🚨 CRITICAL: Desk disconnected >2 mins! Turn on hotspot or check camera.")
                     }
                 }
             }
         } else {
-            // Reconnected successfully
+            // Desk is fully reconnected
             isDeskConnected = true
+
             if (disconnectStartTime != 0L) {
+                if (hasSpokenDisconnect) {
+                    speakUrgentAlert("Connection restored, desk back online.")
+                }
                 disconnectStartTime = 0L
-                lastReportedMinute = -1
+                hasSpokenDisconnect = false
                 cancelDisconnectNotification()
+
+                if (isCriticalDisconnectAlarmFired) {
+                    isCriticalDisconnectAlarmFired = false
+                    if (!isAlarmActiveOnDesk) {
+                        dismissAlarmAndOverlay()
+                    }
+                }
             }
         }
     }
 
-    private fun postEscalatingNotification(title: String, msg: String) {
+    private fun postDisconnectNotification(msg: String) {
         val mgr = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-
         val soundUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
+
         val notif = NotificationCompat.Builder(this, WARNING_CHANNEL_ID)
-            .setContentTitle(title)
+            .setContentTitle("⚠️ DESK CONNECTION LOST")
             .setContentText(msg)
             .setStyle(NotificationCompat.BigTextStyle().bigText(msg))
             .setSmallIcon(android.R.drawable.stat_notify_error)
@@ -247,10 +328,7 @@ class DeskMonitorService : Service() {
     private fun triggerAlarm(reason: String) {
         isCurrentlyRinging = true
         launchOverlay(reason)
-
-        if (!isNightWindow()) {
-            playLoudAlarmSound()
-        }
+        playLoudAlarmSound()
     }
 
     private fun launchOverlay(reason: String) {
@@ -278,15 +356,16 @@ class DeskMonitorService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
+        val snoozeMins = deskPrefs.getSnoozeMinutes()
         val alarmNotif = NotificationCompat.Builder(this, ALARM_CHANNEL_ID)
-            .setContentTitle("🚨 STUDY BREACH DETECTED!")
+            .setContentTitle("🚨 EMERGENCY DESK ALERT!")
             .setContentText(reason)
             .setSmallIcon(android.R.drawable.ic_lock_idle_alarm)
             .setPriority(NotificationCompat.PRIORITY_MAX)
             .setCategory(NotificationCompat.CATEGORY_ALARM)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setFullScreenIntent(pendingIntent, true)
-            .addAction(android.R.drawable.ic_lock_idle_alarm, "SNOOZE (5 MINS)", snoozePendingIntent)
+            .addAction(android.R.drawable.ic_lock_idle_alarm, "SNOOZE (${snoozeMins}M)", snoozePendingIntent)
             .setAutoCancel(false)
             .setOngoing(true)
             .build()
@@ -336,7 +415,7 @@ class DeskMonitorService : Service() {
     private fun startVolumeLockLoop() {
         handler.post(object : Runnable {
             override fun run() {
-                if (isCurrentlyRinging && !isNightWindow()) {
+                if (isCurrentlyRinging && deskPrefs.isGuardArmed() && !deskPrefs.isRestTimeActive()) {
                     lockVolumeToMax()
                 }
                 handler.postDelayed(this, 1000)
@@ -352,18 +431,23 @@ class DeskMonitorService : Service() {
         val mgr = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         mgr.cancel(ALARM_NOTIFICATION_ID)
 
+        val snoozeDelayMs = deskPrefs.getSnoozeMinutes() * 60 * 1000L
+
         handler.postDelayed({
             isSnoozed = false
+            if (!deskPrefs.isGuardArmed() || deskPrefs.isRestTimeActive()) return@postDelayed
+
             dbRef.get().addOnSuccessListener { snapshot ->
                 val deskAlarm = snapshot.child("alarm_active").getValue(Boolean::class.java) ?: false
-                val diffMs = System.currentTimeMillis() - lastHeartbeatTimestamp
-                val elapsedMins = (diffMs / (60 * 1000)).toInt()
+                val now = System.currentTimeMillis()
+                val lastHb = snapshot.child("last_heartbeat").getValue(Long::class.java) ?: 0L
+                val hbAgeSec = (now - lastHb) / 1000
 
-                if (deskAlarm || elapsedMins > 10) {
-                    triggerAlarm("⚠️ SNOOZE EXPIRED: Student still absent from desk!")
+                if (deskAlarm || isCriticalDisconnectAlarmFired || hbAgeSec > 30) {
+                    triggerAlarm("⚠️ SNOOZE EXPIRED: Student still absent or camera disconnected!")
                 }
             }
-        }, SNOOZE_PERIOD_MS)
+        }, snoozeDelayMs)
     }
 
     private fun muteAlarmSound() {
@@ -374,12 +458,13 @@ class DeskMonitorService : Service() {
             }
             mediaPlayer?.release()
             mediaPlayer = null
-        } catch (e: Exception) {}
+        } catch (_: Exception) {}
     }
 
     private fun dismissAlarmAndOverlay() {
         muteAlarmSound()
         isOverlayVisible = false
+        isCriticalDisconnectAlarmFired = false
 
         val mgr = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         mgr.cancel(ALARM_NOTIFICATION_ID)
@@ -388,8 +473,9 @@ class DeskMonitorService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == ACTION_SNOOZE) {
-            snoozeAlarm()
+        when (intent?.action) {
+            ACTION_SNOOZE -> snoozeAlarm()
+            ACTION_STATE_CHANGED -> evaluateSystemState()
         }
         return START_STICKY
     }
@@ -398,6 +484,8 @@ class DeskMonitorService : Service() {
 
     override fun onDestroy() {
         super.onDestroy()
+        tts?.stop()
+        tts?.shutdown()
         valueListener?.let { dbRef.removeEventListener(it) }
         wakeLock?.let { if (it.isHeld) it.release() }
         val restartIntent = Intent(applicationContext, DeskMonitorService::class.java)
